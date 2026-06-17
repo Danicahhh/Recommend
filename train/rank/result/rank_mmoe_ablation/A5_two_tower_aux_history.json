@@ -1,0 +1,29 @@
+{
+  "config": {
+    "name": "A5_two_tower_aux",
+    "use_personalized_mmoe": true,
+    "use_attribute_expert_mask": true,
+    "use_personalized_gate": true,
+    "use_task_bias": true,
+    "use_target_attention": true,
+    "use_auxiliary_loss": true,
+    "use_item_side_features": true,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 1.175226434133947,
+      "val_loss": 0.5672436952590942,
+      "click_logloss": 0.41190728614999156,
+      "click_auc": 0.8504758532355106,
+      "follow_logloss": 0.010325898174579542,
+      "follow_auc": 0.4550079226086231,
+      "like_logloss": 0.057451756562237354,
+      "like_auc": 0.5840901446350488,
+      "share_logloss": 0.028517816713961096,
+      "share_auc": 0.27795860457352695,
+      "mean_auc": 0.5418831312631773
+    }
+  ]
+}

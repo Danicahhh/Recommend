@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "config": {
+    "name": "B2_aux_only",
+    "use_personalized_mmoe": false,
+    "use_attribute_expert_mask": false,
+    "use_personalized_gate": false,
+    "use_task_bias": false,
+    "use_target_attention": false,
+    "use_auxiliary_loss": true,
+    "use_item_side_features": true,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.651017665863037,
+      "val_loss": 2.217458963394165,
+      "click_logloss": 0.6686669498353336,
+      "click_auc": 0.22835112692763943,
+      "follow_logloss": 0.5125097327776831,
+      "follow_auc": NaN,
+      "like_logloss": 0.4675828765564133,
+      "like_auc": 0.28748670684154554,
+      "share_logloss": 0.49763958673617054,
+      "share_auc": NaN,
+      "mean_auc": 0.25791891688459245
+    }
+  ]
+}

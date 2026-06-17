@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "config": {
+    "name": "A5_target_attention",
+    "use_personalized_mmoe": true,
+    "use_attribute_expert_mask": true,
+    "use_personalized_gate": true,
+    "use_task_bias": true,
+    "use_target_attention": true,
+    "use_auxiliary_loss": false,
+    "use_item_side_features": true,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.4149323531559537,
+      "val_loss": 1.7986406683921814,
+      "click_logloss": 0.6568011680348441,
+      "click_auc": 0.2607520207453998,
+      "follow_logloss": 0.3874894378228489,
+      "follow_auc": NaN,
+      "like_logloss": 0.39782344880522846,
+      "like_auc": 0.23537752570010637,
+      "share_logloss": 0.35432426435730874,
+      "share_auc": NaN,
+      "mean_auc": 0.2480647732227531
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "config": {
+    "name": "A1_item_side_features",
+    "use_personalized_mmoe": false,
+    "use_attribute_expert_mask": false,
+    "use_personalized_gate": false,
+    "use_task_bias": false,
+    "use_target_attention": false,
+    "use_auxiliary_loss": false,
+    "use_item_side_features": true,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.5824341433388844,
+      "val_loss": 2.150651216506958,
+      "click_logloss": 0.6675409419362274,
+      "click_auc": 0.2305994648128224,
+      "follow_logloss": 0.5135447734081159,
+      "follow_auc": NaN,
+      "like_logloss": 0.4685065577625009,
+      "like_auc": 0.282523927685218,
+      "share_logloss": 0.49915203535687847,
+      "share_auc": NaN,
+      "mean_auc": 0.2565616962490202
+    }
+  ]
+}

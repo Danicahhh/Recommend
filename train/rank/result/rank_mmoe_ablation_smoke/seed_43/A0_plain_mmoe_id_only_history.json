@@ -1,0 +1,30 @@
+{
+  "seed": 43,
+  "config": {
+    "name": "A0_plain_mmoe_id_only",
+    "use_personalized_mmoe": false,
+    "use_attribute_expert_mask": false,
+    "use_personalized_gate": false,
+    "use_task_bias": false,
+    "use_target_attention": false,
+    "use_auxiliary_loss": false,
+    "use_item_side_features": false,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.669197150639125,
+      "val_loss": 2.3980062007904053,
+      "click_logloss": 0.6542392358578121,
+      "click_auc": 0.4830818033259636,
+      "follow_logloss": 0.5712792439706688,
+      "follow_auc": NaN,
+      "like_logloss": 0.6065974096629313,
+      "like_auc": 0.6716417910447762,
+      "share_logloss": 0.5657369907006483,
+      "share_auc": NaN,
+      "mean_auc": 0.57736179718537
+    }
+  ]
+}

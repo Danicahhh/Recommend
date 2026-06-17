@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyTorch
+*.pth
+*.pt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 训练输出
+checkpoints/
+logs/
+runs/
+*.log
+
+# 数据文件
+*.csv
+*.pkl
+*.h5
+data/
+dataset/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TensorBoard
+events.out.tfevents.*

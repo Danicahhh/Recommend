@@ -1,0 +1,30 @@
+{
+  "seed": 43,
+  "config": {
+    "name": "A6_two_tower_aux",
+    "use_personalized_mmoe": true,
+    "use_attribute_expert_mask": true,
+    "use_personalized_gate": true,
+    "use_task_bias": true,
+    "use_target_attention": true,
+    "use_auxiliary_loss": true,
+    "use_item_side_features": true,
+    "use_profile_features": false
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.4102669784000943,
+      "val_loss": 1.6904087662696838,
+      "click_logloss": 0.613592033409402,
+      "click_auc": 0.2657566727546541,
+      "follow_logloss": 0.2820961615149229,
+      "follow_auc": NaN,
+      "like_logloss": 0.37360332194143386,
+      "like_auc": 0.3805970149253731,
+      "share_logloss": 0.35431071423055216,
+      "share_auc": NaN,
+      "mean_auc": 0.3231768438400136
+    }
+  ]
+}

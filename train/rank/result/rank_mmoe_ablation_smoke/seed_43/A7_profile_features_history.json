@@ -1,0 +1,30 @@
+{
+  "seed": 43,
+  "config": {
+    "name": "A7_profile_features",
+    "use_personalized_mmoe": true,
+    "use_attribute_expert_mask": true,
+    "use_personalized_gate": true,
+    "use_task_bias": true,
+    "use_target_attention": true,
+    "use_auxiliary_loss": true,
+    "use_item_side_features": true,
+    "use_profile_features": true
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 2.4046069043023244,
+      "val_loss": 1.6790542006492615,
+      "click_logloss": 0.6105469194120049,
+      "click_auc": 0.26216796436925244,
+      "follow_logloss": 0.276790965645205,
+      "follow_auc": NaN,
+      "like_logloss": 0.375689900624243,
+      "like_auc": 0.3914800995024875,
+      "share_logloss": 0.349287385311734,
+      "share_auc": NaN,
+      "mean_auc": 0.32682403193586995
+    }
+  ]
+}
