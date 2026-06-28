@@ -35,6 +35,7 @@ checkpoints/
 logs/
 runs/
 result/
+outputs/
 *.log
 
 # 数据文件

@@ -1,3 +1,5 @@
+"""MMoE 多任务排序模型。"""
+
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -11,7 +13,7 @@ class MLP(nn.Module):
         input_dim: int,
         hidden_units: Sequence[int],
         dropout: float = 0.0,
-        output_activation: bool = True, # 后面会在任务塔中关闭：任务最终输出 logit 时，最后一层不能加 ReLU，否则输出无法表达负数，会影响二分类 logits。
+        output_activation: bool = True,  # 后面会在任务塔中关闭：任务最终输出 logit 时，最后一层不能加 ReLU，否则输出无法表达负数，会影响二分类 logits。
     ):
         super().__init__()
         if input_dim <= 0:
@@ -23,17 +25,24 @@ class MLP(nn.Module):
         prev_dim = input_dim
         for idx, hidden_dim in enumerate(hidden_units):
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            if idx < len(hidden_units) - 1 or output_activation: # 如果不是最后一层，或者最后一层需要激活函数，就添加 ReLU 激活函数。
+            if (
+                idx < len(hidden_units) - 1 or output_activation
+            ):  # 如果不是最后一层，或者最后一层需要激活函数，就添加 ReLU 激活函数。
                 layers.append(nn.ReLU())
-                if dropout > 0: # 如果 dropout 大于 0，就添加 Dropout 层，防止过拟合。
+                if dropout > 0:  # 如果 dropout 大于 0，就添加 Dropout 层，防止过拟合。
                     layers.append(nn.Dropout(dropout))
             prev_dim = hidden_dim
-        self.net = nn.Sequential(*layers) # 用 nn.Sequential 将层列表组合成一个完整的网络。这样我们就可以直接调用 self.net(x) 来前向传播了。
+        self.net = nn.Sequential(
+            *layers
+        )  # 用 nn.Sequential 将层列表组合成一个完整的网络。这样我们就可以直接调用 self.net(x) 来前向传播了。
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
 # 输入：x = [batch_size, input_dim]
 # 输出：[batch_size, hidden_units[-1]]
+
 
 class TargetAttention(nn.Module):
     """
@@ -48,7 +57,9 @@ class TargetAttention(nn.Module):
         self.embedding_dim = embedding_dim
         self.num_heads = num_heads
         self.head_dim = embedding_dim // num_heads
-        self.scale = self.head_dim**0.5 # 注意力分数缩放因子，通常是 head_dim 的平方根。这样可以防止在计算 softmax 时分数过大导致梯度消失。
+        self.scale = (
+            self.head_dim**0.5
+        )  # 注意力分数缩放因子，通常是 head_dim 的平方根。这样可以防止在计算 softmax 时分数过大导致梯度消失。
         # 定义四个线性映射：
         # q_proj：把目标物品 embedding 映射成 query
         # k_proj：把历史行为 embedding 映射成 key
@@ -62,9 +73,11 @@ class TargetAttention(nn.Module):
 
     def forward(
         self,
-        target_embedding: torch.Tensor, # 目标物品 embedding，形状为 [batch_size, embedding_dim]。这个是我们用来做 query 的。
-        behavior_embeddings: torch.Tensor, # 用户历史行为 embedding 序列，形状为 [batch_size, seq_len, embedding_dim]。这个是我们用来做 key 和 value 的。
-        behavior_mask: Optional[torch.Tensor] = None, # 用户历史行为的 mask，形状为 [batch_size, seq_len]，其中 1 表示对应位置是 padding，不应该被 attention 关注。这个是可选的，如果没有提供，就表示所有历史行为都是有效的。
+        target_embedding: torch.Tensor,  # 目标物品 embedding，形状为 [batch_size, embedding_dim]。这个是我们用来做 query 的。
+        behavior_embeddings: torch.Tensor,  # 用户历史行为 embedding 序列，形状为 [batch_size, seq_len, embedding_dim]。这个是我们用来做 key 和 value 的。
+        behavior_mask: Optional[
+            torch.Tensor
+        ] = None,  # 用户历史行为的 mask，形状为 [batch_size, seq_len]，其中 1 表示对应位置是 padding，不应该被 attention 关注。这个是可选的，如果没有提供，就表示所有历史行为都是有效的。
     ) -> torch.Tensor:
         # 优化点：用目标物品感知的注意力替代简单历史均值池化，
         # 让用户行为表示随当前待排序物品动态变化。
@@ -86,91 +99,103 @@ class TargetAttention(nn.Module):
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
-    # [batch_size, num_heads, 1, head_dim] * [batch_size, num_heads, head_dim, seq_len] -> [batch_size, num_heads, 1, seq_len]
+        # [batch_size, num_heads, 1, head_dim] * [batch_size, num_heads, head_dim, seq_len] -> [batch_size, num_heads, 1, seq_len]
         scores = torch.matmul(query, key.transpose(-2, -1)) / self.scale
         all_masked = None
-        if behavior_mask is not None: # behavior_mask：[batch_size, seq_len]
-            mask = behavior_mask.unsqueeze(1).unsqueeze(2) # [batch_size, seq_len]-> [batch_size, 1, 1, seq_len]
-            
+        if behavior_mask is not None:  # behavior_mask：[batch_size, seq_len]
+            mask = behavior_mask.unsqueeze(1).unsqueeze(
+                2
+            )  # [batch_size, seq_len]-> [batch_size, 1, 1, seq_len]
+
             scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
             # torch.finfo(scores.dtype) # 返回 scores 的数据类型的浮点数信息(最小值/最大值/精度等)，.min 是该类型能表示的最小值(float32:-3.4e38)。我们用这个最小值来屏蔽 padding 的位置，这样在 softmax 时这些位置的权重会接近 0。
             # scores =
-                # [
-                #   [
-                #     [[0.2, 0.8, -3.4e38]]
-                #   ],
-                #   [
-                #     [[-3.4e38, -3.4e38, -3.4e38]]
-                #   ]
-                # ]
-            all_masked = behavior_mask.all(dim=1, keepdim=True).unsqueeze(1).unsqueeze(2)
+            # [
+            #   [
+            #     [[0.2, 0.8, -3.4e38]]
+            #   ],
+            #   [
+            #     [[-3.4e38, -3.4e38, -3.4e38]]
+            #   ]
+            # ]
+            all_masked = (
+                behavior_mask.all(dim=1, keepdim=True).unsqueeze(1).unsqueeze(2)
+            )
             # 对每个样本，看它整条历史序列是不是全部都是 True（表示这个位置是 padding，需要屏蔽）。
             # behavior_mask：[batch_size, seq_len]
-            # behavior_mask.all(dim=1, keepdim=True) = 
-                # [
-                #   [False], # 第 1 个样本：不是全 padding，所以是 False
-                #   [True] # 第 2 个样本：全是 padding，所以是 True
-                # ]
+            # behavior_mask.all(dim=1, keepdim=True) =
+            # [
+            #   [False], # 第 1 个样本：不是全 padding，所以是 False
+            #   [True] # 第 2 个样本：全是 padding，所以是 True
+            # ]
             # all_masked shape = [2, 1, 1, 1]
             # all_masked =
-                # [
-                #   [
-                #     [[False]]
-                #   ],
-                #   [
-                #     [[True]]
-                #   ]
-                # ]
+            # [
+            #   [
+            #     [[False]]
+            #   ],
+            #   [
+            #     [[True]]
+            #   ]
+            # ]
 
             scores = torch.where(all_masked, torch.zeros_like(scores), scores)
             # torch.where(condition, A, B) 如果 condition 为 True，取 A，否则取 B
             # torch.zeros_like(scores) 生成一个和 scores 形状、类型、设备完全一样的全 0 张量。
             # scores：[batch_size, num_heads, 1, seq_len]
             # scores =
-                # [
-                #   [
-                #     [[0.2, 0.8, -3.4e38]]
-                #   ],
-                #   [
-                #     [[0.0, 0.0, 0.0]]
-                #   ]
-                # ]
+            # [
+            #   [
+            #     [[0.2, 0.8, -3.4e38]]
+            #   ],
+            #   [
+            #     [[0.0, 0.0, 0.0]]
+            #   ]
+            # ]
 
-        weights = F.softmax(scores, dim=-1) # 在历史行为序列维度 seq_len 上做归一化
+        weights = F.softmax(scores, dim=-1)  # 在历史行为序列维度 seq_len 上做归一化
         # weights =
         # [
         #   [[[0.354, 0.646, 0.0]]],
         #   [[[0.333, 0.333, 0.333]]]
         # ]
-        if all_masked is not None: # 为了避免 softmax([0, 0, 0]) = [0.333, 0.333, 0.333] 这种情况
+        if (
+            all_masked is not None
+        ):  # 为了避免 softmax([0, 0, 0]) = [0.333, 0.333, 0.333] 这种情况
             weights = torch.where(all_masked, torch.zeros_like(weights), weights)
             # weights =
             # [
             #   [[[0.354, 0.646, 0.0]]],
             #   [[[0.0, 0.0, 0.0]]]
             # ]
-        weights = self.dropout(weights) # 随机丢弃一部分 attention 权重，减少模型过度依赖某几个历史行为
+        weights = self.dropout(weights)  # 随机丢弃一部分 attention 权重，减少模型过度依赖某几个历史行为
         # weights = [batch_size, num_heads, 1, seq_len]
         # value   = [batch_size, num_heads, seq_len, head_dim]
         # output = [batch_size, num_heads, 1, head_dim]
-        output = torch.matmul(weights, value) # 这一行用 attention 权重对 value 做加权求和
-        output = output.transpose(1, 2).reshape(batch_size, self.embedding_dim) # [batch_size, embedding_dim]
-        return self.out_proj(output) # 最后再通过一个线性层
+        output = torch.matmul(weights, value)  # 这一行用 attention 权重对 value 做加权求和
+        output = output.transpose(1, 2).reshape(
+            batch_size, self.embedding_dim
+        )  # [batch_size, embedding_dim]
+        return self.out_proj(output)  # 最后再通过一个线性层
 
-'''每个 expert 在进入 MLP 前，先学习一组“特征选择权重”，
-让不同 expert 更容易关注不同特征子空间，而不是所有 expert 都看完全一样的输入'''
+
+"""每个 expert 在进入 MLP 前，先学习一组“特征选择权重”，
+让不同 expert 更容易关注不同特征子空间，而不是所有 expert 都看完全一样的输入"""
+
+
 class AttributeExpert(nn.Module):
     """Expert with a learnable feature mask, so experts specialize by attributes."""
-# 不同 expert 可能自动分工：
-# expert 1 更关注用户兴趣
-# expert 2 更关注物品属性
-# expert 3 更关注历史行为
-# expert 4 更关注用户-物品交互
+
+    # 不同 expert 可能自动分工：
+    # expert 1 更关注用户兴趣
+    # expert 2 更关注物品属性
+    # expert 3 更关注历史行为
+    # expert 4 更关注用户-物品交互
 
     def __init__(
         self,
         input_dim: int,
-        hidden_units: Sequence[int], # expert 内部 MLP 的隐藏层结构 例如 (256, 128)
+        hidden_units: Sequence[int],  # expert 内部 MLP 的隐藏层结构 例如 (256, 128)
         dropout: float = 0.0,
         use_attribute_mask: bool = True,
     ):
@@ -188,7 +213,9 @@ class AttributeExpert(nn.Module):
         if self.use_attribute_mask:
             # 优化点：每个专家学习一组软特征掩码，鼓励不同专家关注
             # 不同属性子空间，避免所有专家使用完全相同的输入视角。
-            masked_x = x * torch.sigmoid(self.attribute_mask) # 因为attribute_mask初始值是 0,所以sigmoid(0)=0.5,所以初始时每个特征的权重都是 0.5,然后通过训练让它们学习到不同的特征重要性。
+            masked_x = x * torch.sigmoid(
+                self.attribute_mask
+            )  # 因为attribute_mask初始值是 0,所以sigmoid(0)=0.5,所以初始时每个特征的权重都是 0.5,然后通过训练让它们学习到不同的特征重要性。
         return self.mlp(masked_x)
 
 
@@ -209,10 +236,10 @@ class PersonalizedMMOE(nn.Module):
         gate_units: Sequence[int] = (128, 64),
         tower_units: Sequence[int] = (128, 64),
         dropout: float = 0.0,
-        personalized: bool = True, # 是否开启个性化增强，控制 use_personalized_gate 和 use_task_bias 的默认值
-        use_attribute_expert_mask: bool = True, # expert 是否使用特征 mask
-        use_personalized_gate: Optional[bool] = None, # 让不同样本有不同的 expert 路由倾向
-        use_task_bias: Optional[bool] = None, # 给每个任务一条直接从输入特征到输出 logit 的修正路径。
+        personalized: bool = True,  # 是否开启个性化增强，控制 use_personalized_gate 和 use_task_bias 的默认值
+        use_attribute_expert_mask: bool = True,  # expert 是否使用特征 mask
+        use_personalized_gate: Optional[bool] = None,  # 让不同样本有不同的 expert 路由倾向
+        use_task_bias: Optional[bool] = None,  # 给每个任务一条直接从输入特征到输出 logit 的修正路径。
     ):
         super().__init__()
         if not task_names:
@@ -221,7 +248,9 @@ class PersonalizedMMOE(nn.Module):
             raise ValueError("专家数目必须为正数")
 
         self.task_names = list(task_names)
-        self.use_personalized_gate = personalized if use_personalized_gate is None else use_personalized_gate
+        self.use_personalized_gate = (
+            personalized if use_personalized_gate is None else use_personalized_gate
+        )
         self.use_task_bias = personalized if use_task_bias is None else use_task_bias
         self.num_tasks = len(task_names)
         self.num_experts = num_experts
@@ -244,21 +273,27 @@ class PersonalizedMMOE(nn.Module):
         )
         # 每个门控网络再接一个线性层，把 gate MLP 输出转成 expert 数量维度
         self.gate_logits = nn.ModuleList(
-            [nn.Linear(gate_units[-1], num_experts, bias=False) for _ in range(self.num_tasks)]
+            [
+                nn.Linear(gate_units[-1], num_experts, bias=False)
+                for _ in range(self.num_tasks)
+            ]
         )
         # 个性化门控：gate 不只是“任务级别”的选择，还会根据样本（当前用户、物品、行为特征）动态调整 expert 权重。
         self.personalized_gate_bias = nn.ModuleList(
-            [nn.Linear(input_dim, num_experts, bias=False) for _ in range(self.num_tasks)]
+            [
+                nn.Linear(input_dim, num_experts, bias=False)
+                for _ in range(self.num_tasks)
+            ]
         )
         # 任务专属残差修正：每个任务都有一条直接从输入特征到输出 logit 的修正路径。
         self.task_bias = nn.ModuleList(
             [
                 MLP(
-                    input_dim, 
-                    list(tower_units) + [1], # 最后一层输出 1 个值（表示该任务的预测结果）
-                    dropout=dropout, 
-                    output_activation=False
-                    )
+                    input_dim,
+                    list(tower_units) + [1],  # 最后一层输出 1 个值（表示该任务的预测结果）
+                    dropout=dropout,
+                    output_activation=False,
+                )
                 for _ in range(self.num_tasks)
             ]
         )
@@ -267,7 +302,7 @@ class PersonalizedMMOE(nn.Module):
             [
                 MLP(
                     expert_out_dim,
-                    list(tower_units) + [1], # 最后一层输出 1 个值（表示该任务的预测结果）
+                    list(tower_units) + [1],  # 最后一层输出 1 个值（表示该任务的预测结果）
                     dropout=dropout,
                     output_activation=False,
                 )
@@ -276,16 +311,20 @@ class PersonalizedMMOE(nn.Module):
         )
 
     def forward(
-        self, x: torch.Tensor, return_prob: bool = False # 是否返回概率值
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]: # 输出是两个字典：一个是每个任务的 logits，另一个是每个任务的 gate_weights
+        self, x: torch.Tensor, return_prob: bool = False  # 是否返回概率值
+    ) -> Tuple[
+        Dict[str, torch.Tensor], Dict[str, torch.Tensor]
+    ]:  # 输出是两个字典：一个是每个任务的 logits，另一个是每个任务的 gate_weights
         expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)
 
         logits: Dict[str, torch.Tensor] = {}
         gate_weights: Dict[str, torch.Tensor] = {}
         # 每个任务单独计算 gate、expert 融合和 tower 输出。
         for task_idx, task_name in enumerate(self.task_names):
-            gate_hidden = self.gate_mlps[task_idx](x) # [batch_size, gate_units[-1]]
-            gate_logit = self.gate_logits[task_idx](gate_hidden) # [batch_size, num_experts]
+            gate_hidden = self.gate_mlps[task_idx](x)  # [batch_size, gate_units[-1]]
+            gate_logit = self.gate_logits[task_idx](
+                gate_hidden
+            )  # [batch_size, num_experts]
             if self.use_personalized_gate:
                 # 优化点：增加由输入特征直接生成的个性化门控偏置,input_dim-->num_experts
                 # 根据不同样本的特征动态调整expert权重。
@@ -315,11 +354,11 @@ class RankMMOEModel(nn.Module):
 
     def __init__(
         self,
-        user_vocab_size: int, # 用户 ID 词表大小
+        user_vocab_size: int,  # 用户 ID 词表大小
         item_vocab_size: int,
         task_names: Sequence[str] = ("click", "follow", "like", "share"),
-        category_vocab_size: Optional[int] = None, # 视频类目词表大小，默认为 None
-        gender_vocab_size: Optional[int] = None, # 性别词表大小
+        category_vocab_size: Optional[int] = None,  # 视频类目词表大小，默认为 None
+        gender_vocab_size: Optional[int] = None,  # 性别词表大小
         age_vocab_size: Optional[int] = None,
         embedding_dim: int = 64,
         num_experts: int = 4,
@@ -328,8 +367,8 @@ class RankMMOEModel(nn.Module):
         gate_units: Sequence[int] = (128, 64),
         tower_units: Sequence[int] = (128, 64),
         dropout: float = 0.0,
-        use_personalized_mmoe: bool = True, # 是否使用个性化 MMOE，控制 use_personalized_gate 和 use_task_bias 的默认值
-        use_attribute_expert_mask: bool = True, # expert 是否使用特征 mask
+        use_personalized_mmoe: bool = True,  # 是否使用个性化 MMOE，控制 use_personalized_gate 和 use_task_bias 的默认值
+        use_attribute_expert_mask: bool = True,  # expert 是否使用特征 mask
         # 默认use_personalized_mmoe=True时，use_personalized_gate和use_task_bias也默认开启
         use_personalized_gate: Optional[bool] = None,
         use_task_bias: Optional[bool] = None,
@@ -359,7 +398,7 @@ class RankMMOEModel(nn.Module):
         )
         # 用户画像投影:拼接user_emb + gender_emb + age_emb，拼接后维度是 embedding_dim * 3，然后通过一个线性层投影回 embedding_dim
         self.user_profile_projection = nn.Linear(embedding_dim * 3, embedding_dim)
-           
+
         # 物品属性投影：仅使用预测时可获得的 item 和 category 特征。
         # watching_times 是当前曝光后的行为结果，不能作为排序输入。
         self.target_projection = nn.Linear(embedding_dim * 2, embedding_dim)
@@ -432,7 +471,9 @@ class RankMMOEModel(nn.Module):
         else:
             age_emb = self._zero_embedding_like(user_ids)
 
-        return self.user_profile_projection(torch.cat([user_emb, gender_emb, age_emb], dim=1))
+        return self.user_profile_projection(
+            torch.cat([user_emb, gender_emb, age_emb], dim=1)
+        )
 
     def forward(
         self,
@@ -454,18 +495,24 @@ class RankMMOEModel(nn.Module):
         else:
             behavior_emb = self.item_embedding(behavior_sequence)
             if self.use_target_attention:
-                behavior_repr = self.target_attention(target_emb, behavior_emb, behavior_mask)
+                behavior_repr = self.target_attention(
+                    target_emb, behavior_emb, behavior_mask
+                )
             elif behavior_mask is None:
                 behavior_repr = behavior_emb.mean(dim=1)
             else:
                 valid = (~behavior_mask).unsqueeze(-1).float()
-                behavior_repr = (behavior_emb * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
+                behavior_repr = (behavior_emb * valid).sum(dim=1) / valid.sum(
+                    dim=1
+                ).clamp_min(1.0)
 
         user_vec = self.user_tower(torch.cat([user_emb, behavior_repr], dim=1))
         item_vec = self.item_tower(target_emb)
         # 优化点：MMOE 不再只接收预先拼好的扁平特征，而是联合使用
         # 用户塔、物品塔、目标侧属性和行为上下文，为各任务提供更丰富的交互信号。
-        rank_features = torch.cat([user_vec, item_vec, target_emb, behavior_repr], dim=1)
+        rank_features = torch.cat(
+            [user_vec, item_vec, target_emb, behavior_repr], dim=1
+        )
         logits, gate_weights = self.mmoe(rank_features, return_prob=return_prob)
 
         if not return_auxiliary:
@@ -488,9 +535,11 @@ class RankMultiTaskLoss(nn.Module):
     def __init__(
         self,
         task_names: Sequence[str] = ("click", "follow", "like", "share"),
-        task_weights: Optional[Dict[str, float]] = None, # 控制每个任务对总损失的贡献
-        pos_weights: Optional[Dict[str, float]] = None, # 正样本权重：一个正样本对应几个负样本，解决正负样本不平衡，放大正样本损失
-        auxiliary_weight: float = 0.1, # 双塔辅助损失权重
+        task_weights: Optional[Dict[str, float]] = None,  # 控制每个任务对总损失的贡献
+        pos_weights: Optional[
+            Dict[str, float]
+        ] = None,  # 正样本权重：一个正样本对应几个负样本，解决正负样本不平衡，放大正样本损失
+        auxiliary_weight: float = 0.1,  # 双塔辅助损失权重
     ):
         super().__init__()
         self.task_names = list(task_names)
@@ -501,7 +550,9 @@ class RankMultiTaskLoss(nn.Module):
             self.pos_weights = None
         else:
             weights = [float(pos_weights.get(task, 1.0)) for task in self.task_names]
-            self.register_buffer("pos_weights", torch.tensor(weights, dtype=torch.float32))
+            self.register_buffer(
+                "pos_weights", torch.tensor(weights, dtype=torch.float32)
+            )
 
     def forward(
         self,
@@ -521,7 +572,9 @@ class RankMultiTaskLoss(nn.Module):
                 predictions[task], targets[task].float(), pos_weight=pos_weight
             )
             losses[task] = task_loss
-            total = total + self.task_weights.get(task, 1.0) * task_loss # 所有任务的损失加权求和，得到总损失
+            total = (
+                total + self.task_weights.get(task, 1.0) * task_loss
+            )  # 所有任务的损失加权求和，得到总损失
 
         if (
             auxiliary_outputs is not None
@@ -532,7 +585,7 @@ class RankMultiTaskLoss(nn.Module):
                 auxiliary_outputs["two_tower_logit"], auxiliary_target.float()
             )
             losses["two_tower_aux"] = aux_loss
-            total = total + self.auxiliary_weight * aux_loss # 再加上双塔辅助损失，得到最终总损失
+            total = total + self.auxiliary_weight * aux_loss  # 再加上双塔辅助损失，得到最终总损失
 
         return total, losses
 

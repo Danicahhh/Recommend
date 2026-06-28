@@ -1,7 +1,7 @@
-"""
-从原始数据中抽取前 N 条数据
-用于小样本测试
-"""
+"""从原始 CSV 中抽取小样本。"""
+
+import argparse
+from pathlib import Path
 
 import pandas as pd
 
@@ -22,12 +22,13 @@ def sample_first_n_rows(input_file, output_file, n_rows=10000):
 
 
 if __name__ == "__main__":
-    input_file = "data\\ctr_data_1M.csv"
-    output_file = "data\\ctr_data_500k.csv"
-
-    sampled_df = sample_first_n_rows(
-        input_file=input_file,
-        output_file=output_file,
-        n_rows=500000,
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_file", type=Path)
+    parser.add_argument("output_file", type=Path)
+    parser.add_argument("--rows", type=int, default=10000)
+    args = parser.parse_args()
+    sample_first_n_rows(
+        input_file=args.input_file,
+        output_file=args.output_file,
+        n_rows=args.rows,
     )
-    print("\n完成!")

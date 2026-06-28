@@ -1,20 +1,16 @@
-import argparse
 import json
-import sys
+import math
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
 import pandas as pd
 import torch
-from sklearn.metrics import log_loss, roc_auc_score
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
-
-from models.rank_mmoe import RankMMOEModel, RankMultiTaskLoss
-from train.rank.train_rank_mmoe import CTRDataset, TASK_NAMES, build_maps, move_batch
+from recommender.data.rank import TASK_NAMES, RankDataset, build_feature_maps
+from recommender.evaluation import compute_multitask_metrics
+from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
+from recommender.training.rank import move_batch
 
 
 ABLATIONS = (
@@ -174,7 +170,8 @@ def evaluate(
     model.eval()
     total_loss = 0.0
     targets: Dict[str, List[float]] = {task: [] for task in TASK_NAMES}
-    scores: Dict[str, List[float]] = {task: [] for task in TASK_NAMES}
+    logits_by_task: Dict[str, List[float]] = {task: [] for task in TASK_NAMES}
+    user_ids: List[int] = []
 
     for batch in loader:
         batch = move_batch(batch, device)
@@ -188,24 +185,23 @@ def evaluate(
         auxiliary_target = batch["targets"]["click"] if use_auxiliary_loss else None
         loss, _ = criterion(logits, batch["targets"], auxiliary, auxiliary_target)
         total_loss += loss.item()
+        user_ids.extend(batch["user_ids"].detach().cpu().view(-1).tolist())
 
         for task in TASK_NAMES:
-            targets[task].extend(batch["targets"][task].detach().cpu().view(-1).tolist())
-            scores[task].extend(torch.sigmoid(logits[task]).detach().cpu().view(-1).tolist())
+            targets[task].extend(
+                batch["targets"][task].detach().cpu().view(-1).tolist()
+            )
+            logits_by_task[task].extend(logits[task].detach().cpu().view(-1).tolist())
 
     metrics: Dict[str, float] = {"val_loss": total_loss / max(len(loader), 1)}
-    auc_values = []
-    for task in TASK_NAMES:
-        task_targets = targets[task]
-        task_scores = scores[task]
-        metrics[f"{task}_logloss"] = float(log_loss(task_targets, task_scores, labels=[0, 1]))
-        if len(set(task_targets)) < 2:
-            metrics[f"{task}_auc"] = float("nan")
-        else:
-            metrics[f"{task}_auc"] = float(roc_auc_score(task_targets, task_scores))
-            auc_values.append(metrics[f"{task}_auc"])
-
-    metrics["mean_auc"] = float(sum(auc_values) / len(auc_values)) if auc_values else float("nan")
+    metrics.update(
+        compute_multitask_metrics(
+            targets=targets,
+            logits=logits_by_task,
+            user_ids=user_ids,
+            task_names=TASK_NAMES,
+        )
+    )
     return metrics
 
 
@@ -219,7 +215,9 @@ def forward_model(
     return model(
         user_ids=batch["user_ids"],
         item_ids=batch["item_ids"],
-        video_category_ids=batch["video_category_ids"] if use_item_side_features else None,
+        video_category_ids=batch["video_category_ids"]
+        if use_item_side_features
+        else None,
         gender_ids=batch["gender_ids"] if use_profile_features else None,
         age_ids=batch["age_ids"] if use_profile_features else None,
         behavior_sequence=batch["behavior_sequence"],
@@ -229,7 +227,7 @@ def forward_model(
 
 
 def run_one_seed(
-    args: argparse.Namespace,
+    args,
     frame: pd.DataFrame,
     seed: int,
     output_dir: Path,
@@ -241,10 +239,14 @@ def run_one_seed(
     split_index = int(len(seed_frame) * (1.0 - args.val_ratio))
     train_frame = seed_frame.iloc[:split_index].reset_index(drop=True)
     val_frame = seed_frame.iloc[split_index:].reset_index(drop=True)
-    user_map, item_map, category_map, gender_map, age_map = build_maps(frame)
+    user_map, item_map, category_map, gender_map, age_map = build_feature_maps(frame)
 
-    train_dataset = CTRDataset(train_frame, user_map, item_map, category_map, gender_map, age_map)
-    val_dataset = CTRDataset(val_frame, user_map, item_map, category_map, gender_map, age_map)
+    train_dataset = RankDataset(
+        train_frame, user_map, item_map, category_map, gender_map, age_map
+    )
+    val_dataset = RankDataset(
+        val_frame, user_map, item_map, category_map, gender_map, age_map
+    )
     train_generator = torch.Generator()
     train_generator.manual_seed(seed)
     train_loader = DataLoader(
@@ -254,7 +256,9 @@ def run_one_seed(
         num_workers=0,
         generator=train_generator,
     )
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0
+    )
 
     device = torch.device(args.device)
     seed_rows = []
@@ -283,9 +287,13 @@ def run_one_seed(
         ).to(device)
         criterion = RankMultiTaskLoss(
             task_names=TASK_NAMES,
-            auxiliary_weight=args.auxiliary_weight if exp["use_auxiliary_loss"] else 0.0,
+            auxiliary_weight=args.auxiliary_weight
+            if exp["use_auxiliary_loss"]
+            else 0.0,
         )
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
 
         history = []
         print(f"seed={seed} running {exp['name']}")
@@ -313,16 +321,38 @@ def run_one_seed(
             history.append(epoch_row)
             print(
                 f"seed={seed} {exp['name']} epoch={epoch} train_loss={train_loss:.6f} "
-                f"val_loss={metrics['val_loss']:.6f} mean_auc={metrics['mean_auc']:.6f}"
+                f"val_loss={metrics['val_loss']:.6f} "
+                f"mean_auc={metrics['mean_auc']:.6f} "
+                f"mean_gauc={metrics['mean_gauc']:.6f} "
+                f"mean_logloss={metrics['mean_logloss']:.6f}"
             )
 
-        best = max(history, key=lambda row: row["mean_auc"])
+        best = max(
+            history,
+            key=lambda row: (
+                row["mean_gauc"] if math.isfinite(row["mean_gauc"]) else float("-inf")
+            ),
+        )
+        if not any(math.isfinite(row["mean_gauc"]) for row in history):
+            print(
+                f"warning: seed={seed} {exp['name']} has no computable mean_gauc; "
+                "retaining the first epoch as best"
+            )
         row = {"seed": seed, **exp, **best}
         seed_rows.append(row)
-        with (seed_dir / f"{exp['name']}_history.json").open("w", encoding="utf-8") as f:
-            json.dump({"seed": seed, "config": exp, "history": history}, f, ensure_ascii=False, indent=2)
+        with (seed_dir / f"{exp['name']}_history.json").open(
+            "w", encoding="utf-8"
+        ) as f:
+            json.dump(
+                {"seed": seed, "config": exp, "history": history},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
-    pd.DataFrame(seed_rows).to_csv(seed_dir / "summary.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(seed_rows).to_csv(
+        seed_dir / "summary.csv", index=False, encoding="utf-8-sig"
+    )
     return seed_rows
 
 
@@ -342,15 +372,21 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
         "epoch",
         "train_loss",
         "val_loss",
-        "click_logloss",
         "click_auc",
-        "follow_logloss",
+        "click_gauc",
+        "click_logloss",
         "follow_auc",
-        "like_logloss",
+        "follow_gauc",
+        "follow_logloss",
         "like_auc",
-        "share_logloss",
+        "like_gauc",
+        "like_logloss",
         "share_auc",
+        "share_gauc",
+        "share_logloss",
         "mean_auc",
+        "mean_gauc",
+        "mean_logloss",
     ]
 
     rows = []
@@ -363,7 +399,7 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def run_ablation(args: argparse.Namespace) -> None:
+def run_rank_ablation(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     frame = pd.read_csv(args.data_path, nrows=args.sample_rows)
 
@@ -372,48 +408,11 @@ def run_ablation(args: argparse.Namespace) -> None:
         all_rows.extend(run_one_seed(args, frame, seed, args.output_dir))
 
     per_seed = pd.DataFrame(all_rows)
-    per_seed.to_csv(args.output_dir / "per_seed_results.csv", index=False, encoding="utf-8-sig")
+    per_seed.to_csv(
+        args.output_dir / "per_seed_results.csv", index=False, encoding="utf-8-sig"
+    )
     summary = summarize_results(per_seed)
     summary.to_csv(args.output_dir / "summary.csv", index=False, encoding="utf-8-sig")
 
     print(f"saved per-seed results to {args.output_dir / 'per_seed_results.csv'}")
     print(f"saved summary to {args.output_dir / 'summary.csv'}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-path", type=Path, default=ROOT / "data" / "ctr_data_500k.csv")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "train" / "rank" / "result" / "rank_mmoe_ablation")
-    parser.add_argument("--sample-rows", type=int, default=20000)
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--embedding-dim", type=int, default=32)
-    parser.add_argument("--num-experts", type=int, default=3)
-    parser.add_argument("--num-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--auxiliary-weight", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-5)
-    parser.add_argument("--val-ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--seeds", type=int, nargs="+", default=None)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    args = parser.parse_args()
-    if args.seeds is None:
-        args.seeds = [args.seed]
-    return args
-
-
-if __name__ == "__main__":
-    parsed_args = parse_args()
-    try:
-        run_ablation(parsed_args)
-    except RuntimeError as exc:
-        is_cuda_oom = "CUDA out of memory" in str(exc)
-        if is_cuda_oom and parsed_args.device.startswith("cuda") and parsed_args.batch_size > 256:
-            print("CUDA OOM with batch_size=", parsed_args.batch_size, "; retrying with batch_size=256")
-            torch.cuda.empty_cache()
-            parsed_args.batch_size = 256
-            run_ablation(parsed_args)
-        else:
-            raise
