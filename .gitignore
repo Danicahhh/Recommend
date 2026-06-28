@@ -34,6 +34,7 @@ wheels/
 checkpoints/
 logs/
 runs/
+result/
 *.log
 
 # 数据文件

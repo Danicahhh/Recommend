@@ -7,9 +7,9 @@
 ```text
 .
 ├── data/
-│   └── ctr_data_500k.csv           # 默认训练数据（不纳入 Git）
+│   
 ├── models/
-│   ├── baseline_mmoe.py            # 基础 MMOE
+│   ├── baseline_mmoe.py            # DNN 扩展版标准 MMOE
 │   ├── rank_mmoe.py                # 优化后的多任务排序模型
 │   └── two_tower_recall.py         # 双塔召回模型
 ├── process/
@@ -46,17 +46,6 @@
 
 ```text
 click / follow / like / share
-```
-
-主要数据流：
-
-```text
-用户画像 ───────────────────────┐
-                               ├─> 用户塔 ─> user_vec ─┐
-当前候选物品 ─> Target Attention ─> 行为表示 ───────────┤
-                                                       ├─> MMOE ─> 四个任务 Logit
-当前候选物品 ─> 物品塔 ─> item_vec ────────────────────┤
-当前候选物品综合表示 target_emb ───────────────────────┘
 ```
 
 相较于基础 MMOE，`models/rank_mmoe.py` 包含以下增强：
@@ -116,7 +105,7 @@ data/ctr_data_500k.csv
 | `share` | 分享标签，取值为 0 或 1 |
 
 > [!NOTE]
-> 原始 Tenrec 数据中的 `watching_times`（官方代码中也称 `play_times`）是当前用户在当前视频上的曝光后观看行为。项目不会读取或使用该字段，避免在曝光前排序任务中引入未来信息。CSV 可以保留此列，但模型会完全忽略它。
+> 原始 Tenrec 数据中的 `watching_times`（官方代码中也称 `play_times`）是用户在该视频上的观看行为次数。项目不会读取或使用该字段，避免在曝光前排序任务中引入未来信息。CSV 可以保留此列，但模型会完全忽略它。
 
 ## 环境安装
 
@@ -133,8 +122,6 @@ pip install torch pandas numpy scikit-learn
 ```bash
 pip install jupyter
 ```
-
-`requirements.txt` 是当前开发环境的完整导出，其中包含 CUDA 版本和部分本机构建路径。跨机器安装时，建议根据设备从 PyTorch 官方渠道安装对应的 CPU 或 CUDA 版本，再安装其余核心依赖。
 
 ## 快速开始
 
@@ -174,7 +161,7 @@ python train/rank/train_rank_mmoe.py --data-path data/ctr_data_500k.csv --epochs
 | `--lr` | `1e-3` | AdamW 学习率 |
 | `--weight-decay` | `1e-5` | 权重衰减 |
 | `--device` | 自动选择 | 例如 `cpu`、`cuda` 或 `cuda:0` |
-| `--baseline-mmoe` | 关闭 | 使用基础 MMOE，关闭个性化增强 |
+| `--baseline-mmoe` | 关闭 | 关闭个性化 Gate 和任务残差；当前仍保留属性专家掩码 |
 | `--mean-pooling` | 关闭 | 使用历史均值池化替代 Target Attention |
 
 快速冒烟测试：
@@ -243,7 +230,7 @@ models/two_tower_recall.py
 ## 主要代码入口
 
 - `models/rank_mmoe.py`：优化排序模型与多任务损失；
-- `models/baseline_mmoe.py`：基础 MMOE；
+- `models/baseline_mmoe.py`：DNN 扩展版标准 MMOE，返回任务 Logit 与 Gate 权重；
 - `models/two_tower_recall.py`：双塔召回；
 - `train/rank/train_rank_mmoe.py`：排序训练；
 - `train/rank/ablation_rank_mmoe.py`：多随机种子消融实验。
