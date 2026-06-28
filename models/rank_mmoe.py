@@ -360,14 +360,9 @@ class RankMMOEModel(nn.Module):
         # 用户画像投影:拼接user_emb + gender_emb + age_emb，拼接后维度是 embedding_dim * 3，然后通过一个线性层投影回 embedding_dim
         self.user_profile_projection = nn.Linear(embedding_dim * 3, embedding_dim)
            
-        # 把观看时长映射到 embedding_dim 维度的向量
-        self.watch_projection = nn.Sequential(
-            nn.Linear(1, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, embedding_dim),
-        )
-        # 物品属性投影:拼接item_emb + category_emb + watch_emb，拼接后维度是 embedding_dim * 3，然后通过一个线性层投影回 embedding_dim
-        self.target_projection = nn.Linear(embedding_dim * 3, embedding_dim)
+        # 物品属性投影：仅使用预测时可获得的 item 和 category 特征。
+        # watching_times 是当前曝光后的行为结果，不能作为排序输入。
+        self.target_projection = nn.Linear(embedding_dim * 2, embedding_dim)
 
         self.target_attention = TargetAttention(embedding_dim, num_heads, dropout)
 
@@ -411,7 +406,6 @@ class RankMMOEModel(nn.Module):
         self,
         item_ids: torch.Tensor,
         video_category_ids: Optional[torch.Tensor],
-        watching_times: Optional[torch.Tensor],
     ) -> torch.Tensor:
         item_emb = self.item_embedding(item_ids)
         if self.category_embedding is not None and video_category_ids is not None:
@@ -419,13 +413,7 @@ class RankMMOEModel(nn.Module):
         else:
             category_emb = self._zero_embedding_like(item_ids)
 
-        if watching_times is None:
-            watch_emb = self._zero_embedding_like(item_ids)
-        else:
-            watch_value = torch.log1p(watching_times.float()).view(-1, 1)
-            watch_emb = self.watch_projection(watch_value)
-
-        return self.target_projection(torch.cat([item_emb, category_emb, watch_emb], dim=1))
+        return self.target_projection(torch.cat([item_emb, category_emb], dim=1))
 
     def _make_user_embedding(
         self,
@@ -452,7 +440,6 @@ class RankMMOEModel(nn.Module):
         item_ids: torch.Tensor,
         behavior_sequence: Optional[torch.Tensor] = None,
         video_category_ids: Optional[torch.Tensor] = None,
-        watching_times: Optional[torch.Tensor] = None,
         gender_ids: Optional[torch.Tensor] = None,
         age_ids: Optional[torch.Tensor] = None,
         behavior_mask: Optional[torch.Tensor] = None,
@@ -460,7 +447,7 @@ class RankMMOEModel(nn.Module):
         return_auxiliary: bool = False,
     ):
         user_emb = self._make_user_embedding(user_ids, gender_ids, age_ids)
-        target_emb = self._make_target_embedding(item_ids, video_category_ids, watching_times)
+        target_emb = self._make_target_embedding(item_ids, video_category_ids)
 
         if behavior_sequence is None:
             behavior_repr = torch.zeros_like(target_emb)

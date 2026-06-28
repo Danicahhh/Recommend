@@ -60,11 +60,6 @@ class CTRDataset(Dataset):
             .values,
             dtype=torch.long,
         )
-        self.watching_times = torch.tensor(
-            frame["watching_times"].fillna(0).astype("float32").values,
-            dtype=torch.float32,
-        )
-
         history = frame.loc[:, HIST_COLUMNS].copy()
         history = history.replace({"\\N": None, "": None}).apply(pd.to_numeric, errors="coerce")
         for column in HIST_COLUMNS:
@@ -87,7 +82,6 @@ class CTRDataset(Dataset):
             "video_category_ids": self.video_category_ids[index],
             "gender_ids": self.gender_ids[index],
             "age_ids": self.age_ids[index],
-            "watching_times": self.watching_times[index],
             "behavior_sequence": self.behavior_sequence[index],
             "behavior_mask": self.behavior_mask[index],
             "targets": {task: target[index] for task, target in self.targets.items()},
@@ -150,7 +144,6 @@ def train(args: argparse.Namespace) -> None:
                 user_ids=batch["user_ids"],
                 item_ids=batch["item_ids"],
                 video_category_ids=batch["video_category_ids"],
-                watching_times=batch["watching_times"],
                 gender_ids=batch["gender_ids"],
                 age_ids=batch["age_ids"],
                 behavior_sequence=batch["behavior_sequence"],

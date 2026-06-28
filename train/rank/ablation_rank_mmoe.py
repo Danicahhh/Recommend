@@ -220,7 +220,6 @@ def forward_model(
         user_ids=batch["user_ids"],
         item_ids=batch["item_ids"],
         video_category_ids=batch["video_category_ids"] if use_item_side_features else None,
-        watching_times=batch["watching_times"] if use_item_side_features else None,
         gender_ids=batch["gender_ids"] if use_profile_features else None,
         age_ids=batch["age_ids"] if use_profile_features else None,
         behavior_sequence=batch["behavior_sequence"],
