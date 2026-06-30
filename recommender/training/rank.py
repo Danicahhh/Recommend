@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from recommender.data.rank import TASK_NAMES, RankDataset, build_feature_maps
+from recommender.data_process.rank import TASK_NAMES, RankDataset, build_feature_maps
 from recommender.evaluation import compute_multitask_metrics
 from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
 

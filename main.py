@@ -10,7 +10,7 @@ from recommender.training.recall import run_recall_training
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA = ROOT / "data" / "ctr_data_500k.csv"
+DEFAULT_DATA = ROOT / "dataset" / "ctr_data_500k.csv"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 

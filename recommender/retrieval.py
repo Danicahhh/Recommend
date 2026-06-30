@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from recommender.data.recall import (
+from recommender.data_process.recall import (
     TwoTowerDataset,
     UserSample,
     build_user_samples,

@@ -42,7 +42,6 @@ outputs/
 *.csv
 *.pkl
 *.h5
-data/
 dataset/
 
 # IDE

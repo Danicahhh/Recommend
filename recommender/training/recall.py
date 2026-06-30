@@ -9,7 +9,7 @@ from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from recommender.data.recall import TwoTowerDataset, collate_fn
+from recommender.data_process.recall import TwoTowerDataset, collate_fn
 from recommender.models.two_tower import build_two_tower_model
 
 

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from recommender.data.rank import HIST_COLUMNS, RankDataset, build_feature_maps
-from recommender.data.recall import TwoTowerDataset
+from recommender.data_process.rank import HIST_COLUMNS, RankDataset, build_feature_maps
+from recommender.data_process.recall import TwoTowerDataset
 
 
 def sample_frame():
