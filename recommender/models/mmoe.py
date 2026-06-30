@@ -236,10 +236,9 @@ class PersonalizedMMOE(nn.Module):
         gate_units: Sequence[int] = (128, 64),
         tower_units: Sequence[int] = (128, 64),
         dropout: float = 0.0,
-        personalized: bool = True,  # 是否开启个性化增强，控制 use_personalized_gate 和 use_task_bias 的默认值
         use_attribute_expert_mask: bool = True,  # expert 是否使用特征 mask
-        use_personalized_gate: Optional[bool] = None,  # 让不同样本有不同的 expert 路由倾向
-        use_task_bias: Optional[bool] = None,  # 给每个任务一条直接从输入特征到输出 logit 的修正路径。
+        use_personalized_gate: bool = True,  # 让不同样本有不同的 expert 路由倾向
+        use_task_bias: bool = True,  # 给每个任务一条直接从输入特征到输出 logit 的修正路径。
     ):
         super().__init__()
         if not task_names:
@@ -248,10 +247,8 @@ class PersonalizedMMOE(nn.Module):
             raise ValueError("专家数目必须为正数")
 
         self.task_names = list(task_names)
-        self.use_personalized_gate = (
-            personalized if use_personalized_gate is None else use_personalized_gate
-        )
-        self.use_task_bias = personalized if use_task_bias is None else use_task_bias
+        self.use_personalized_gate = use_personalized_gate
+        self.use_task_bias = use_task_bias
         self.num_tasks = len(task_names)
         self.num_experts = num_experts
 
@@ -367,11 +364,9 @@ class RankMMOEModel(nn.Module):
         gate_units: Sequence[int] = (128, 64),
         tower_units: Sequence[int] = (128, 64),
         dropout: float = 0.0,
-        use_personalized_mmoe: bool = True,  # 是否使用个性化 MMOE，控制 use_personalized_gate 和 use_task_bias 的默认值
         use_attribute_expert_mask: bool = True,  # expert 是否使用特征 mask
-        # 默认use_personalized_mmoe=True时，use_personalized_gate和use_task_bias也默认开启
-        use_personalized_gate: Optional[bool] = None,
-        use_task_bias: Optional[bool] = None,
+        use_personalized_gate: bool = True,
+        use_task_bias: bool = True,
         use_target_attention: bool = True,
     ):
         super().__init__()
@@ -419,7 +414,6 @@ class RankMMOEModel(nn.Module):
             gate_units=gate_units,
             tower_units=tower_units,
             dropout=dropout,
-            personalized=use_personalized_mmoe,
             use_attribute_expert_mask=use_attribute_expert_mask,
             use_personalized_gate=use_personalized_gate,
             use_task_bias=use_task_bias,

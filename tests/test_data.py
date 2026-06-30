@@ -49,7 +49,6 @@ class DataTest(unittest.TestCase):
             dataset = TwoTowerDataset(
                 str(path),
                 max_seq_len=10,
-                item_mapping_mode="contiguous",
                 sample_rows=3,
             )
         self.assertEqual(len(dataset), 3)

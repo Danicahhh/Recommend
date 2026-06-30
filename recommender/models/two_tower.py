@@ -111,8 +111,15 @@ class TransformerBehaviorEncoder(nn.Module):
         seq_emb = self.pos_encoder(seq_emb)
 
         # True 表示 padding 位置，会被 Transformer 忽略
+        all_padding = None
         if behavior_mask is not None:
             padding_mask = behavior_mask.bool()
+            all_padding = padding_mask.all(dim=1)
+            if all_padding.any():
+                # PyTorch 的 nested-tensor 路径无法处理整个 batch 都为空的序列。
+                # 临时开放一个位置完成计算，池化时仍使用原始 mask 并返回零表示。
+                padding_mask = padding_mask.clone()
+                padding_mask[all_padding, 0] = False
         else:
             padding_mask = None
 
@@ -130,6 +137,8 @@ class TransformerBehaviorEncoder(nn.Module):
             sequence_repr = transformer_out.mean(dim=1)  # [batch, emb_dim]
 
         sequence_repr = self.layer_norm(sequence_repr)
+        if all_padding is not None and all_padding.any():
+            sequence_repr = sequence_repr.masked_fill(all_padding.unsqueeze(1), 0.0)
         return sequence_repr
 
 
@@ -143,7 +152,8 @@ class DNN(nn.Module):
 
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.BatchNorm1d(hidden_dim))
+            # LayerNorm 对 batch size 没有限制，最后一个 batch 只有一条样本时也稳定。
+            layers.append(nn.LayerNorm(hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
             prev_dim = hidden_dim

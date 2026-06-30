@@ -13,6 +13,43 @@ from recommender.evaluation import compute_multitask_metrics
 from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
 
 
+CLICK_NEGATIVE_RATIO = 2
+
+
+def sample_click_negatives(
+    frame: pd.DataFrame,
+    seed: int,
+    negative_ratio: int = CLICK_NEGATIVE_RATIO,
+) -> pd.DataFrame:
+    """Keep every click-positive row and sample negatives at the official 1:2 ratio."""
+    if "click" not in frame.columns:
+        raise ValueError("ranking data must contain a 'click' column")
+    if negative_ratio <= 0:
+        raise ValueError("negative_ratio must be positive")
+
+    positive_frame = frame.loc[frame["click"] == 1]
+    negative_frame = frame.loc[frame["click"] == 0]
+    required_negatives = len(positive_frame) * negative_ratio
+    if not len(positive_frame):
+        raise ValueError("click negative sampling requires at least one positive row")
+    if len(negative_frame) < required_negatives:
+        raise ValueError(
+            "not enough click-negative rows for 1:"
+            f"{negative_ratio} sampling: need {required_negatives}, "
+            f"found {len(negative_frame)}"
+        )
+
+    sampled_negatives = negative_frame.sample(
+        n=required_negatives,
+        replace=False,
+        random_state=seed,
+    )
+    return pd.concat(
+        [positive_frame, sampled_negatives],
+        ignore_index=True,
+    )
+
+
 def split_rank_frame(
     frame: pd.DataFrame,
     val_ratio: float,
@@ -46,6 +83,15 @@ def split_rank_frame(
 
 def run_rank_training(args) -> None:
     frame = pd.read_csv(args.data_path, nrows=args.sample_rows)
+    source_size = len(frame)
+    frame = sample_click_negatives(frame, seed=args.seed)
+    positive_size = int((frame["click"] == 1).sum())
+    negative_size = len(frame) - positive_size
+    print(
+        f"click sampling source={source_size} sampled={len(frame)} "
+        f"positive={positive_size} negative={negative_size} "
+        f"ratio=1:{CLICK_NEGATIVE_RATIO}"
+    )
     train_frame, val_frame, test_frame = split_rank_frame(
         frame,
         val_ratio=args.val_ratio,
@@ -103,7 +149,8 @@ def run_rank_training(args) -> None:
         "gate_units": hidden_units,
         "tower_units": hidden_units,
         "dropout": args.dropout,
-        "use_personalized_mmoe": not args.baseline_mmoe,
+        "use_personalized_gate": args.use_personalized_gate,
+        "use_task_bias": args.use_task_bias,
         "use_target_attention": not args.mean_pooling,
     }
     model = RankMMOEModel(
@@ -224,6 +271,13 @@ def run_rank_training(args) -> None:
         )
 
     results = {
+        "click_sampling": {
+            "source": source_size,
+            "sampled": len(frame),
+            "positive": positive_size,
+            "negative": negative_size,
+            "negative_ratio": CLICK_NEGATIVE_RATIO,
+        },
         "split_sizes": {
             "train": len(train_frame),
             "validation": len(val_frame),

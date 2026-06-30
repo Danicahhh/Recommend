@@ -1,6 +1,6 @@
 """双塔召回的数据处理与数据集封装。"""
 
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -8,6 +8,12 @@ import torch
 from torch.utils.data import Dataset
 
 UserSample = Tuple[int, np.ndarray, np.ndarray, int, int]
+
+
+def build_categorical_mapping(values: Iterable) -> Dict[str, int]:
+    """构建稳定的离散特征映射，0 统一留给未知值。"""
+    unique_values = sorted({str(value) for value in values})
+    return {value: index + 1 for index, value in enumerate(unique_values)}
 
 
 def build_padded_behavior_sequence(raw_sequence, max_seq_len: int):
@@ -42,13 +48,11 @@ class TwoTowerDataset(Dataset):
         self,
         data_path: str,
         max_seq_len: int = 10,
-        item_mapping_mode: str = "contiguous",
         sample_rows: Optional[int] = None,
+        feature_mappings: Optional[Mapping] = None,
+        legacy_encoding: bool = False,
     ):
         self.max_seq_len = max_seq_len
-        self.item_mapping_mode = item_mapping_mode.lower()
-        if self.item_mapping_mode not in {"contiguous", "raw"}:
-            raise ValueError("item_mapping_mode must be 'contiguous' or 'raw'")
 
         print(f"正在加载数据: {data_path}")
         df = pd.read_csv(
@@ -66,14 +70,52 @@ class TwoTowerDataset(Dataset):
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(np.int64)
             df[col] = df[col].clip(lower=0)
 
+        if df.empty:
+            raise ValueError("recall dataset must contain at least one row")
+
         # 用户侧/物品侧离散特征编码
         df["gender"] = df["gender"].fillna("UNK").astype(str)
         df["age"] = df["age"].fillna("UNK").astype(str)
         df["video_category"] = df["video_category"].fillna("UNK").astype(str)
 
-        df["gender_id"] = pd.Categorical(df["gender"]).codes.astype(np.int64)
-        df["age_id"] = pd.Categorical(df["age"]).codes.astype(np.int64)
-        df["video_category_id"] = pd.Categorical(df["video_category"]).codes.astype(np.int64)
+        if legacy_encoding:
+            gender_mapping = {
+                str(value): int(index)
+                for index, value in enumerate(sorted(df["gender"].unique()))
+            }
+            age_mapping = {
+                str(value): int(index)
+                for index, value in enumerate(sorted(df["age"].unique()))
+            }
+            category_mapping = {
+                str(value): int(index)
+                for index, value in enumerate(sorted(df["video_category"].unique()))
+            }
+        elif feature_mappings is None:
+            gender_mapping = build_categorical_mapping(df["gender"])
+            age_mapping = build_categorical_mapping(df["age"])
+            category_mapping = build_categorical_mapping(df["video_category"])
+        else:
+            gender_mapping = {
+                str(key): int(value)
+                for key, value in feature_mappings["gender_to_id"].items()
+            }
+            age_mapping = {
+                str(key): int(value)
+                for key, value in feature_mappings["age_to_id"].items()
+            }
+            category_mapping = {
+                str(key): int(value)
+                for key, value in feature_mappings["category_to_id"].items()
+            }
+
+        df["gender_id"] = (
+            df["gender"].map(gender_mapping).fillna(0).astype(np.int64)
+        )
+        df["age_id"] = df["age"].map(age_mapping).fillna(0).astype(np.int64)
+        df["video_category_id"] = (
+            df["video_category"].map(category_mapping).fillna(0).astype(np.int64)
+        )
 
         # 标签清洗
         df["click"] = pd.to_numeric(df["click"], errors="coerce").fillna(0).astype(np.float32)
@@ -86,42 +128,74 @@ class TwoTowerDataset(Dataset):
         ])
         unique_item_ids = np.unique(all_item_ids[all_item_ids > 0])
 
-        if self.item_mapping_mode == "contiguous":
-            # 将 item_id 和历史行为里的 item 编号统一映射成连续 ID，0 预留给 padding/未知值
-            self.item_id_to_contiguous = {int(raw_id): int(idx + 1) for idx, raw_id in enumerate(unique_item_ids)}
-            self.item_ids = np.array(
-                [self.item_id_to_contiguous.get(int(raw_id), 0) for raw_id in df["item_id"].values],
-                dtype=np.int64,
-            )
-            self.behavior_sequences = np.array(
-                [
-                    [self.item_id_to_contiguous.get(int(raw_id), 0) for raw_id in row]
-                    for row in df[self.hist_cols].values
-                ],
-                dtype=np.int64,
-            )
-            self.item_vocab_size = int(unique_item_ids.size) + 1
-            self.item_id_space_size = self.item_vocab_size
-            self.item_id_offset = 0
+        # 模型内部始终使用连续 ID，避免稀疏原始 ID 产生巨大 embedding。
+        if feature_mappings is None:
+            self.item_id_to_contiguous = {
+                int(raw_id): int(idx + 1)
+                for idx, raw_id in enumerate(unique_item_ids)
+            }
         else:
-            # 保留原始 item 编号，仅做正整数清洗；0 仍然作为 padding/unknown
-            self.item_id_to_contiguous = None
-            self.item_ids = df["item_id"].values.astype(np.int64)
-            self.behavior_sequences = df[self.hist_cols].values.astype(np.int64)
-            self.item_vocab_size = int(max(df["item_id"].max(), df[self.hist_cols].max().max())) + 1
-            self.item_id_space_size = self.item_vocab_size
-            self.item_id_offset = 0
+            self.item_id_to_contiguous = {
+                int(raw_id): int(model_id)
+                for raw_id, model_id in feature_mappings[
+                    "item_id_to_model_id"
+                ].items()
+            }
+        self.item_ids = np.array(
+            [
+                self.item_id_to_contiguous.get(int(raw_id), 0)
+                for raw_id in df["item_id"].values
+            ],
+            dtype=np.int64,
+        )
+        self.behavior_sequences = np.array(
+            [
+                [
+                    self.item_id_to_contiguous.get(int(raw_id), 0)
+                    for raw_id in row
+                ]
+                for row in df[self.hist_cols].values
+            ],
+            dtype=np.int64,
+        )
+        self.item_vocab_size = (
+            max(self.item_id_to_contiguous.values(), default=0) + 1
+        )
+        self.model_id_to_raw_item_id = {
+            model_id: raw_id
+            for raw_id, model_id in self.item_id_to_contiguous.items()
+        }
+
+        self.item_id_space_size = self.item_vocab_size
+        self.item_id_offset = 0
 
         self.unique_item_ids = unique_item_ids
+        candidate_raw_ids = np.unique(
+            df.loc[df["item_id"] > 0, "item_id"].to_numpy(dtype=np.int64)
+        )
+        self.candidate_item_ids = np.asarray(
+            [
+                self.item_id_to_contiguous[int(raw_id)]
+                for raw_id in candidate_raw_ids
+                if int(raw_id) in self.item_id_to_contiguous
+            ],
+            dtype=np.int64,
+        )
+        if self.candidate_item_ids.size == 0:
+            raise ValueError("recall dataset contains no valid candidate items")
+
+        self.gender_mapping = gender_mapping
+        self.age_mapping = age_mapping
+        self.category_mapping = category_mapping
         self.gender_ids = df["gender_id"].values
         self.age_ids = df["age_id"].values
         self.video_category_ids = df["video_category_id"].values
         self.labels = df["click"].values
 
         self.user_vocab_size = int(df["user_id"].max()) + 1
-        self.gender_vocab_size = int(df["gender_id"].max()) + 1
-        self.age_vocab_size = int(df["age_id"].max()) + 1
-        self.video_category_vocab_size = int(df["video_category_id"].max()) + 1
+        self.gender_vocab_size = max(gender_mapping.values(), default=0) + 1
+        self.age_vocab_size = max(age_mapping.values(), default=0) + 1
+        self.video_category_vocab_size = max(category_mapping.values(), default=0) + 1
 
         # user_id -> 用户侧特征映射（召回时构造 user embedding 需要）
         self.user_gender_by_id = build_first_value_mapping(
@@ -144,7 +218,7 @@ class TwoTowerDataset(Dataset):
 
         print(f"用户数: {df['user_id'].nunique()}")
         print(f"物品数(去重后): {len(unique_item_ids)}")
-        print(f"item 映射模式: {self.item_mapping_mode}")
+        print("item 映射模式: contiguous")
         print(f"样本数: {len(df)}")
         print(f"User vocab size: {self.user_vocab_size}")
         print(f"Item vocab size: {self.item_vocab_size}")
@@ -152,6 +226,25 @@ class TwoTowerDataset(Dataset):
         print(f"Age vocab size: {self.age_vocab_size}")
         print(f"Video-category vocab size: {self.video_category_vocab_size}")
         print(f"正样本比例: {self.labels.mean():.4f}")
+
+    def export_feature_mappings(self) -> Dict:
+        """导出 checkpoint 推理所需的稳定特征映射。"""
+        return {
+            "version": 1,
+            "item_id_to_model_id": dict(self.item_id_to_contiguous),
+            "gender_to_id": dict(self.gender_mapping),
+            "age_to_id": dict(self.age_mapping),
+            "category_to_id": dict(self.category_mapping),
+        }
+
+    def raw_item_id(self, model_item_id: int) -> int:
+        """把模型内部 item ID 转回业务侧原始 ID。"""
+        if model_item_id == 0:
+            raise ValueError("padding/unknown item ID 0 cannot be recalled")
+        try:
+            return int(self.model_id_to_raw_item_id[int(model_item_id)])
+        except KeyError as error:
+            raise ValueError(f"unknown model item ID: {model_item_id}") from error
 
     def __len__(self) -> int:
         return len(self.user_ids)

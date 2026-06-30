@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional, Sequence
@@ -30,6 +31,7 @@ class RecallEngine:
         ann_nprobe: int,
         faiss_index_path: Optional[Path] = None,
         rebuild_faiss: bool = False,
+        index_namespace: str = "",
     ):
         self.model = model.to(device)
         self.device = device
@@ -39,6 +41,20 @@ class RecallEngine:
         self.ann_nprobe = ann_nprobe
         self.faiss_index_path = faiss_index_path
         self.faiss_index = None
+        self.candidate_item_ids = np.asarray(
+            dataset.candidate_item_ids, dtype=np.int64
+        )
+        fingerprint = hashlib.sha256(self.candidate_item_ids.tobytes())
+        candidate_raw_ids = np.asarray(
+            [
+                dataset.raw_item_id(int(model_id))
+                for model_id in self.candidate_item_ids
+            ],
+            dtype=np.int64,
+        )
+        fingerprint.update(candidate_raw_ids.tobytes())
+        fingerprint.update(index_namespace.encode("utf-8"))
+        self.index_fingerprint = fingerprint.hexdigest()
         if use_faiss and faiss is None:
             print("FAISS is unavailable; falling back to exact retrieval")
 
@@ -56,7 +72,9 @@ class RecallEngine:
     def _compute_item_embeddings(self):
         self.model.eval()
         embeddings = []
-        item_ids = torch.arange(self.dataset.item_vocab_size, device=self.device)
+        item_ids = torch.tensor(
+            self.candidate_item_ids, device=self.device, dtype=torch.long
+        )
         for start in tqdm(
             range(0, len(item_ids), 1024),
             desc="test item embeddings",
@@ -90,8 +108,17 @@ class RecallEngine:
     def _load_index(self) -> bool:
         if not self.faiss_index_path or not self.faiss_index_path.exists():
             return False
+        metadata_path = self.faiss_index_path.with_suffix(
+            self.faiss_index_path.suffix + ".json"
+        )
+        if not metadata_path.exists():
+            return False
+        with metadata_path.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        if metadata.get("candidate_fingerprint") != self.index_fingerprint:
+            return False
         index = faiss.read_index(str(self.faiss_index_path))
-        if index.ntotal != self.dataset.item_vocab_size:
+        if index.ntotal != len(self.candidate_item_ids):
             return False
         index.nprobe = min(self.ann_nprobe, index.nlist)
         self.faiss_index = index
@@ -102,12 +129,24 @@ class RecallEngine:
             return
         self.faiss_index_path.parent.mkdir(parents=True, exist_ok=True)
         faiss.write_index(self.faiss_index, str(self.faiss_index_path))
+        metadata_path = self.faiss_index_path.with_suffix(
+            self.faiss_index_path.suffix + ".json"
+        )
+        with metadata_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                {"candidate_fingerprint": self.index_fingerprint},
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
 
     @torch.no_grad()
     def recall(self, user_samples: Sequence[UserSample], top_k: int):
         self.model.eval()
         results = {}
-        limit = min(top_k, self.dataset.item_vocab_size)
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+        limit = min(top_k, len(self.candidate_item_ids))
         for user_id, sequence, mask, gender_id, age_id in tqdm(
             user_samples,
             desc="test recall",
@@ -126,16 +165,27 @@ class RecallEngine:
                 faiss.normalize_L2(query)
                 scores, item_ids = self.faiss_index.search(query, limit)
                 results[user_id] = [
-                    (int(item_id), float(score))
-                    for item_id, score in zip(item_ids[0], scores[0])
+                    (
+                        self.dataset.raw_item_id(
+                            self.candidate_item_ids[int(candidate_index)]
+                        ),
+                        float(score),
+                    )
+                    for candidate_index, score in zip(item_ids[0], scores[0])
+                    if candidate_index >= 0
                 ]
             else:
                 scores = self.model.predict_batch(user_embedding, self.item_embeddings)
-                top_scores, top_ids = torch.topk(scores, k=limit)
+                top_scores, top_indices = torch.topk(scores, k=limit)
                 results[user_id] = [
-                    (int(item_id), float(score))
-                    for item_id, score in zip(
-                        top_ids.cpu().numpy(), top_scores.cpu().numpy()
+                    (
+                        self.dataset.raw_item_id(
+                            self.candidate_item_ids[int(candidate_index)]
+                        ),
+                        float(score),
+                    )
+                    for candidate_index, score in zip(
+                        top_indices.cpu().numpy(), top_scores.cpu().numpy()
                     )
                 ]
         return results
@@ -156,10 +206,23 @@ def _validate_vocab(dataset, expected):
         )
 
 
+def _validate_mapping_strategy(data_config):
+    strategy = data_config.get(
+        "mapping_strategy",
+        data_config.get("item_mapping_mode", "contiguous"),
+    )
+    if strategy != "contiguous":
+        raise ValueError(
+            "raw item mapping checkpoints are no longer supported; "
+            "retrain the recall model with contiguous mapping"
+        )
+
+
 def run_recall_generation(args) -> Path:
     device = torch.device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     data_config = checkpoint["data_config"]
+    _validate_mapping_strategy(data_config)
     sample_rows = (
         args.sample_rows
         if args.sample_rows is not None
@@ -168,14 +231,31 @@ def run_recall_generation(args) -> Path:
     dataset = TwoTowerDataset(
         str(args.data_path),
         max_seq_len=data_config["max_seq_len"],
-        item_mapping_mode=data_config["item_mapping_mode"],
         sample_rows=sample_rows,
+        feature_mappings=checkpoint.get("feature_mappings"),
+        legacy_encoding="feature_mappings" not in checkpoint,
     )
     _validate_vocab(dataset, checkpoint["vocab_sizes"])
     model = build_two_tower_model(**checkpoint["model_config"])
-    model.load_state_dict(checkpoint["model_state_dict"])
+    incompatible = model.load_state_dict(
+        checkpoint["model_state_dict"],
+        strict=checkpoint.get("checkpoint_version", 1) >= 2,
+    )
+    if checkpoint.get("checkpoint_version", 1) < 2 and incompatible.unexpected_keys:
+        print(
+            "Loaded a legacy checkpoint; obsolete BatchNorm state was ignored: "
+            f"{incompatible.unexpected_keys}"
+        )
     output_path = Path(args.output_path)
     index_path = output_path.with_suffix(".faiss.index")
+    checkpoint_stat = Path(args.checkpoint).stat()
+    index_namespace = checkpoint.get(
+        "checkpoint_id",
+        (
+            f"{Path(args.checkpoint).resolve()}:"
+            f"{checkpoint_stat.st_size}:{checkpoint_stat.st_mtime_ns}"
+        ),
+    )
     engine = RecallEngine(
         model=model,
         device=device,
@@ -185,6 +265,7 @@ def run_recall_generation(args) -> Path:
         ann_nprobe=args.ann_nprobe,
         faiss_index_path=index_path,
         rebuild_faiss=args.rebuild_faiss,
+        index_namespace=index_namespace,
     )
     unique_users = np.unique(dataset.user_ids)[: args.num_users]
     user_samples = build_user_samples(

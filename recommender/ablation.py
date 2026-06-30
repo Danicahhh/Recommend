@@ -11,13 +11,12 @@ from tqdm import tqdm
 from recommender.data_process.rank import TASK_NAMES, RankDataset, build_feature_maps
 from recommender.evaluation import compute_multitask_metrics
 from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
-from recommender.training.rank import move_batch
+from recommender.training.rank import move_batch, sample_click_negatives
 
 
 ABLATIONS = (
     {
         "name": "A0_plain_mmoe_id_only",
-        "use_personalized_mmoe": False,
         "use_attribute_expert_mask": False,
         "use_personalized_gate": False,
         "use_task_bias": False,
@@ -28,7 +27,6 @@ ABLATIONS = (
     },
     {
         "name": "A1_item_side_features",
-        "use_personalized_mmoe": False,
         "use_attribute_expert_mask": False,
         "use_personalized_gate": False,
         "use_task_bias": False,
@@ -39,7 +37,6 @@ ABLATIONS = (
     },
     {
         "name": "A2_attribute_expert_mask",
-        "use_personalized_mmoe": False,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": False,
         "use_task_bias": False,
@@ -50,7 +47,6 @@ ABLATIONS = (
     },
     {
         "name": "A3_personalized_gate",
-        "use_personalized_mmoe": True,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": True,
         "use_task_bias": False,
@@ -61,7 +57,6 @@ ABLATIONS = (
     },
     {
         "name": "A4_task_bias",
-        "use_personalized_mmoe": True,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": True,
         "use_task_bias": True,
@@ -72,7 +67,6 @@ ABLATIONS = (
     },
     {
         "name": "A5_target_attention",
-        "use_personalized_mmoe": True,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": True,
         "use_task_bias": True,
@@ -83,7 +77,6 @@ ABLATIONS = (
     },
     {
         "name": "A6_two_tower_aux",
-        "use_personalized_mmoe": True,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": True,
         "use_task_bias": True,
@@ -94,7 +87,6 @@ ABLATIONS = (
     },
     {
         "name": "A7_profile_features",
-        "use_personalized_mmoe": True,
         "use_attribute_expert_mask": True,
         "use_personalized_gate": True,
         "use_task_bias": True,
@@ -105,7 +97,6 @@ ABLATIONS = (
     },
     {
         "name": "B1_target_attention_only",
-        "use_personalized_mmoe": False,
         "use_attribute_expert_mask": False,
         "use_personalized_gate": False,
         "use_task_bias": False,
@@ -116,7 +107,6 @@ ABLATIONS = (
     },
     {
         "name": "B2_aux_only",
-        "use_personalized_mmoe": False,
         "use_attribute_expert_mask": False,
         "use_personalized_gate": False,
         "use_task_bias": False,
@@ -243,6 +233,47 @@ def forward_model(
     )
 
 
+def build_ablation_model(args, exp: Dict, vocab_sizes: Dict[str, int]):
+    """按 CLI 参数构建消融模型，便于保证训练和测试使用同一套配置。"""
+    hidden_units = [args.hidden_dim] * args.num_layers
+    return RankMMOEModel(
+        user_vocab_size=vocab_sizes["user"],
+        item_vocab_size=vocab_sizes["item"],
+        category_vocab_size=vocab_sizes["category"],
+        gender_vocab_size=vocab_sizes["gender"],
+        age_vocab_size=vocab_sizes["age"],
+        task_names=TASK_NAMES,
+        embedding_dim=args.embedding_dim,
+        num_experts=args.num_experts,
+        num_heads=args.num_heads,
+        expert_units=hidden_units,
+        gate_units=hidden_units,
+        tower_units=hidden_units,
+        dropout=args.dropout,
+        use_attribute_expert_mask=exp["use_attribute_expert_mask"],
+        use_personalized_gate=exp["use_personalized_gate"],
+        use_task_bias=exp["use_task_bias"],
+        use_target_attention=exp["use_target_attention"],
+    )
+
+
+def build_ablation_train_loader(
+    dataset: RankDataset,
+    batch_size: int,
+    seed: int,
+) -> DataLoader:
+    """每个消融项使用相同 seed 的独立 generator，确保 batch 顺序一致。"""
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        generator=generator,
+    )
+
+
 def run_one_seed(
     args,
     frame: pd.DataFrame,
@@ -252,11 +283,16 @@ def run_one_seed(
     seed_dir = output_dir / f"seed_{seed}"
     seed_dir.mkdir(parents=True, exist_ok=True)
 
-    seed_frame = frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    sampled_frame = sample_click_negatives(frame, seed=seed)
+    seed_frame = sampled_frame.sample(frac=1.0, random_state=seed).reset_index(
+        drop=True
+    )
     split_index = int(len(seed_frame) * (1.0 - args.val_ratio))
     train_frame = seed_frame.iloc[:split_index].reset_index(drop=True)
     val_frame = seed_frame.iloc[split_index:].reset_index(drop=True)
-    user_map, item_map, category_map, gender_map, age_map = build_feature_maps(frame)
+    user_map, item_map, category_map, gender_map, age_map = build_feature_maps(
+        sampled_frame
+    )
 
     train_dataset = RankDataset(
         train_frame, user_map, item_map, category_map, gender_map, age_map
@@ -264,44 +300,31 @@ def run_one_seed(
     val_dataset = RankDataset(
         val_frame, user_map, item_map, category_map, gender_map, age_map
     )
-    train_generator = torch.Generator()
-    train_generator.manual_seed(seed)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
-        generator=train_generator,
-    )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0
     )
 
     device = torch.device(args.device)
     seed_rows = []
+    vocab_sizes = {
+        "user": len(user_map),
+        "item": len(item_map) + 1,
+        "category": len(category_map) + 1,
+        "gender": len(gender_map) + 1,
+        "age": len(age_map) + 1,
+    }
 
     for exp in ABLATIONS:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-        model = RankMMOEModel(
-            user_vocab_size=len(user_map),
-            item_vocab_size=len(item_map) + 1,
-            category_vocab_size=len(category_map) + 1,
-            gender_vocab_size=len(gender_map) + 1,
-            age_vocab_size=len(age_map) + 1,
-            task_names=TASK_NAMES,
-            embedding_dim=args.embedding_dim,
-            num_experts=args.num_experts,
-            num_heads=args.num_heads,
-            dropout=args.dropout,
-            use_personalized_mmoe=exp["use_personalized_mmoe"],
-            use_attribute_expert_mask=exp["use_attribute_expert_mask"],
-            use_personalized_gate=exp["use_personalized_gate"],
-            use_task_bias=exp["use_task_bias"],
-            use_target_attention=exp["use_target_attention"],
-        ).to(device)
+        model = build_ablation_model(args, exp, vocab_sizes).to(device)
+        train_loader = build_ablation_train_loader(
+            train_dataset,
+            batch_size=args.batch_size,
+            seed=seed,
+        )
         criterion = RankMultiTaskLoss(
             task_names=TASK_NAMES,
             auxiliary_weight=args.auxiliary_weight
@@ -367,7 +390,19 @@ def run_one_seed(
             "w", encoding="utf-8"
         ) as f:
             json.dump(
-                {"seed": seed, "config": exp, "history": history},
+                {
+                    "seed": seed,
+                    "config": exp,
+                    "model_hyperparameters": {
+                        "embedding_dim": args.embedding_dim,
+                        "hidden_dim": args.hidden_dim,
+                        "num_layers": args.num_layers,
+                        "num_experts": args.num_experts,
+                        "num_heads": args.num_heads,
+                        "dropout": args.dropout,
+                    },
+                    "history": history,
+                },
                 f,
                 ensure_ascii=False,
                 indent=2,
@@ -382,7 +417,6 @@ def run_one_seed(
 def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
     config_columns = [
         "name",
-        "use_personalized_mmoe",
         "use_attribute_expert_mask",
         "use_personalized_gate",
         "use_task_bias",

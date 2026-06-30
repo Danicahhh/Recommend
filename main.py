@@ -43,7 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     rank_train = rank_commands.add_parser("train", help="训练排序模型")
     add_rank_model_arguments(rank_train)
-    rank_train.add_argument("--baseline-mmoe", action="store_true")
+    rank_train.add_argument(
+        "--use-personalized-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    rank_train.add_argument(
+        "--use-task-bias",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     rank_train.add_argument("--mean-pooling", action="store_true")
     rank_train.add_argument(
         "--output-dir",
@@ -81,9 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
     recall_train.add_argument("--max-seq-len", type=int, default=10)
     recall_train.add_argument(
         "--loss-type", choices=("bce", "infonce"), default="infonce"
-    )
-    recall_train.add_argument(
-        "--item-mapping-mode", choices=("contiguous", "raw"), default="contiguous"
     )
     recall_train.add_argument("--infonce-temperature", type=float, default=0.07)
     recall_train.add_argument("--embedding-dim", type=int, default=32)

@@ -16,6 +16,19 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.embedding_dim, 32)
         self.assertEqual((args.hidden_dim, args.num_layers), (128, 2))
         self.assertEqual(args.lr, 1e-4)
+        self.assertTrue(args.use_personalized_gate)
+        self.assertTrue(args.use_task_bias)
+
+    def test_rank_train_personalized_features_can_be_disabled_independently(self):
+        gate_args = self.parser.parse_args(
+            ["rank", "train", "--no-use-personalized-gate"]
+        )
+        self.assertFalse(gate_args.use_personalized_gate)
+        self.assertTrue(gate_args.use_task_bias)
+
+        bias_args = self.parser.parse_args(["rank", "train", "--no-use-task-bias"])
+        self.assertTrue(bias_args.use_personalized_gate)
+        self.assertFalse(bias_args.use_task_bias)
 
     def test_rank_ablation(self):
         args = self.parser.parse_args(["rank", "ablation", "--seeds", "1", "2"])
@@ -25,7 +38,13 @@ class CliTest(unittest.TestCase):
     def test_recall_train(self):
         args = self.parser.parse_args(["recall", "train"])
         self.assertEqual(args.loss_type, "infonce")
-        self.assertEqual(args.item_mapping_mode, "contiguous")
+        self.assertFalse(hasattr(args, "item_mapping_mode"))
+
+    def test_recall_train_rejects_removed_raw_mapping_option(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(
+                ["recall", "train", "--item-mapping-mode", "raw"]
+            )
 
     def test_recall_generate(self):
         args = self.parser.parse_args(

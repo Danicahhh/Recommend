@@ -2,10 +2,46 @@ import unittest
 
 import pandas as pd
 
-from recommender.training.rank import split_rank_frame
+from recommender.training.rank import sample_click_negatives, split_rank_frame
 
 
 class RankSplitTest(unittest.TestCase):
+    def test_official_click_negative_sampling_keeps_all_positives(self):
+        frame = pd.DataFrame(
+            {
+                "row_id": range(12),
+                "click": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            }
+        )
+
+        sampled = sample_click_negatives(frame, seed=100)
+
+        self.assertEqual(int((sampled["click"] == 1).sum()), 3)
+        self.assertEqual(int((sampled["click"] == 0).sum()), 6)
+        self.assertSetEqual(
+            set(sampled.loc[sampled["click"] == 1, "row_id"]),
+            {0, 1, 2},
+        )
+
+    def test_click_negative_sampling_is_reproducible(self):
+        frame = pd.DataFrame(
+            {
+                "row_id": range(20),
+                "click": [1, 1, 1, 1] + [0] * 16,
+            }
+        )
+
+        first = sample_click_negatives(frame, seed=17)
+        second = sample_click_negatives(frame, seed=17)
+
+        self.assertListEqual(first["row_id"].tolist(), second["row_id"].tolist())
+
+    def test_click_negative_sampling_rejects_insufficient_negatives(self):
+        frame = pd.DataFrame({"click": [1, 1, 0, 0, 0]})
+
+        with self.assertRaisesRegex(ValueError, "not enough click-negative"):
+            sample_click_negatives(frame, seed=100)
+
     def test_official_eight_one_one_split(self):
         frame = pd.DataFrame({"row_id": range(100)})
 

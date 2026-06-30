@@ -1,4 +1,5 @@
 import json
+import uuid
 from pathlib import Path
 from typing import Dict
 
@@ -229,7 +230,6 @@ def run_recall_training(args) -> Dict[str, Path]:
     dataset = TwoTowerDataset(
         str(args.data_path),
         max_seq_len=args.max_seq_len,
-        item_mapping_mode=args.item_mapping_mode,
         sample_rows=args.sample_rows,
     )
     if len(dataset) < 2:
@@ -269,17 +269,20 @@ def run_recall_training(args) -> Dict[str, Path]:
         loss_type=args.loss_type,
         infonce_temperature=args.infonce_temperature,
     )
-    experiment_name = f"two_tower_{args.item_mapping_mode}_{args.loss_type}"
+    experiment_name = f"two_tower_contiguous_{args.loss_type}"
     output_dir = Path(args.output_dir)
     checkpoint_path = output_dir / f"{experiment_name}_best.pt"
     history_path = output_dir / f"{experiment_name}_history.json"
     metadata = {
+        "checkpoint_version": 2,
+        "checkpoint_id": uuid.uuid4().hex,
         "model_config": model_config,
         "data_config": {
-            "item_mapping_mode": args.item_mapping_mode,
+            "mapping_strategy": "contiguous",
             "max_seq_len": args.max_seq_len,
             "sample_rows": args.sample_rows,
         },
+        "feature_mappings": dataset.export_feature_mappings(),
         "vocab_sizes": {
             key: model_config[key]
             for key in (
