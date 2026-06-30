@@ -10,24 +10,27 @@ from recommender.training.recall import run_recall_training
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA = ROOT / "dataset" / "ctr_data_500k.csv"
+DEFAULT_DATA = ROOT / "dataset" / "ctr_data_1M.csv"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def add_rank_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--sample-rows", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--embedding-dim", type=int, default=64)
-    parser.add_argument("--num-experts", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--embedding-dim", type=int, default=32)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--num-experts", type=int, default=2)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--auxiliary-weight", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-5)
-    parser.add_argument("--val-ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--test-ratio", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--device", default=DEFAULT_DEVICE)
 
 
@@ -42,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_rank_model_arguments(rank_train)
     rank_train.add_argument("--baseline-mmoe", action="store_true")
     rank_train.add_argument("--mean-pooling", action="store_true")
+    rank_train.add_argument(
+        "--output-dir",
+        type=Path,
+        default=ROOT / "outputs" / "rank",
+    )
     rank_train.set_defaults(handler=run_rank_training)
 
     rank_ablation = rank_commands.add_parser("ablation", help="运行排序消融实验")

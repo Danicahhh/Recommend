@@ -96,11 +96,17 @@ class TwoTowerTrainer:
             embeddings["user_repr"], embeddings["item_repr"], labels
         )
 
-    def train_epoch(self) -> float:
+    def train_epoch(self, epoch: int, epochs: int) -> float:
         self.model.train()
         total_loss = 0.0
         batches = 0
-        for batch in tqdm(self.train_loader, desc="recall train", leave=False):
+        progress = tqdm(
+            self.train_loader,
+            desc=f"recall train {epoch}/{epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+        for batch in progress:
             scores, embeddings, labels = self._forward_batch(batch)
             loss = self._compute_loss(scores, labels, embeddings)
             if loss is None:
@@ -111,21 +117,29 @@ class TwoTowerTrainer:
             self.optimizer.step()
             total_loss += loss.item()
             batches += 1
+            progress.set_postfix(loss=f"{total_loss / batches:.6f}")
         return total_loss / max(batches, 1)
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(self, epoch: int, epochs: int) -> Dict[str, float]:
         self.model.eval()
         total_loss = 0.0
         batches = 0
         scores_all = []
         labels_all = []
-        for batch in tqdm(self.val_loader, desc="recall validate", leave=False):
+        progress = tqdm(
+            self.val_loader,
+            desc=f"recall validate {epoch}/{epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+        for batch in progress:
             scores, embeddings, labels = self._forward_batch(batch)
             loss = self._compute_loss(scores, labels, embeddings)
             if loss is not None:
                 total_loss += loss.item()
                 batches += 1
+                progress.set_postfix(loss=f"{total_loss / batches:.6f}")
             scores_all.extend(torch.sigmoid(scores).cpu().view(-1).tolist())
             labels_all.extend(labels.cpu().view(-1).tolist())
 
@@ -157,8 +171,8 @@ class TwoTowerTrainer:
         best_loss = float("inf")
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         for epoch in range(1, epochs + 1):
-            train_loss = self.train_epoch()
-            metrics = self.validate()
+            train_loss = self.train_epoch(epoch, epochs)
+            metrics = self.validate(epoch, epochs)
             self.scheduler.step(metrics["val_loss"])
             self.history["train_loss"].append(train_loss)
             for key in ("val_loss", "val_auc", "val_precision", "val_recall"):

@@ -6,6 +6,7 @@ from typing import Dict, List
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from recommender.data_process.rank import TASK_NAMES, RankDataset, build_feature_maps
 from recommender.evaluation import compute_multitask_metrics
@@ -136,10 +137,17 @@ def train_one_epoch(
     use_item_side_features: bool,
     use_profile_features: bool,
     use_auxiliary_loss: bool,
+    progress_desc: str = "ablation train",
 ) -> float:
     model.train()
     total_loss = 0.0
-    for batch in loader:
+    progress = tqdm(
+        loader,
+        desc=progress_desc,
+        unit="batch",
+        dynamic_ncols=True,
+    )
+    for batch_index, batch in enumerate(progress, start=1):
         batch = move_batch(batch, device)
         optimizer.zero_grad()
         logits, auxiliary = forward_model(
@@ -154,6 +162,7 @@ def train_one_epoch(
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+        progress.set_postfix(loss=f"{total_loss / batch_index:.6f}")
     return total_loss / max(len(loader), 1)
 
 
@@ -166,6 +175,7 @@ def evaluate(
     use_item_side_features: bool,
     use_profile_features: bool,
     use_auxiliary_loss: bool,
+    progress_desc: str = "ablation validate",
 ) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -173,7 +183,13 @@ def evaluate(
     logits_by_task: Dict[str, List[float]] = {task: [] for task in TASK_NAMES}
     user_ids: List[int] = []
 
-    for batch in loader:
+    progress = tqdm(
+        loader,
+        desc=progress_desc,
+        unit="batch",
+        dynamic_ncols=True,
+    )
+    for batch_index, batch in enumerate(progress, start=1):
         batch = move_batch(batch, device)
         logits, auxiliary = forward_model(
             model,
@@ -185,6 +201,7 @@ def evaluate(
         auxiliary_target = batch["targets"]["click"] if use_auxiliary_loss else None
         loss, _ = criterion(logits, batch["targets"], auxiliary, auxiliary_target)
         total_loss += loss.item()
+        progress.set_postfix(loss=f"{total_loss / batch_index:.6f}")
         user_ids.extend(batch["user_ids"].detach().cpu().view(-1).tolist())
 
         for task in TASK_NAMES:
@@ -307,6 +324,9 @@ def run_one_seed(
                 use_item_side_features=exp["use_item_side_features"],
                 use_profile_features=exp["use_profile_features"],
                 use_auxiliary_loss=exp["use_auxiliary_loss"],
+                progress_desc=(
+                    f"ablation train {exp['name']} {epoch}/{args.epochs}"
+                ),
             )
             metrics = evaluate(
                 model,
@@ -316,6 +336,9 @@ def run_one_seed(
                 use_item_side_features=exp["use_item_side_features"],
                 use_profile_features=exp["use_profile_features"],
                 use_auxiliary_loss=exp["use_auxiliary_loss"],
+                progress_desc=(
+                    f"ablation validate {exp['name']} {epoch}/{args.epochs}"
+                ),
             )
             epoch_row = {"epoch": epoch, "train_loss": train_loss, **metrics}
             history.append(epoch_row)

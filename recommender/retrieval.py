@@ -58,7 +58,10 @@ class RecallEngine:
         embeddings = []
         item_ids = torch.arange(self.dataset.item_vocab_size, device=self.device)
         for start in tqdm(
-            range(0, len(item_ids), 1024), desc="item embeddings", leave=False
+            range(0, len(item_ids), 1024),
+            desc="test item embeddings",
+            unit="batch",
+            dynamic_ncols=True,
         ):
             batch_ids = item_ids[start : start + 1024]
             categories = torch.tensor(
@@ -106,7 +109,10 @@ class RecallEngine:
         results = {}
         limit = min(top_k, self.dataset.item_vocab_size)
         for user_id, sequence, mask, gender_id, age_id in tqdm(
-            user_samples, desc="recall", leave=False
+            user_samples,
+            desc="test recall",
+            unit="user",
+            dynamic_ncols=True,
         ):
             user_embedding = self.model.get_user_embedding(
                 torch.tensor([user_id], device=self.device),
