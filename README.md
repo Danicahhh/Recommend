@@ -68,6 +68,25 @@ python main.py rank train --data-path dataset/ctr_data_1M.csv
 `click=0` 样本，再将采样结果随机划分为 80% 训练集、10% 验证集和
 10% 测试集。负样本采样和数据划分均由 `--seed` 控制。
 
+排序训练和消融实验共用以下主要默认参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `--epochs` | `10` | 最大训练轮数，可能因早停提前结束 |
+| `--batch-size` | `1024` | 同时用于训练、验证和测试 DataLoader |
+| `--embedding-dim` | `32` | Embedding 维度 |
+| `--hidden-dim` | `128` | Expert、Gate 和 Tower 隐藏层维度 |
+| `--num-layers` | `2` | MLP 隐藏层数 |
+| `--num-experts` | `3` | MMoE Expert 数量 |
+| `--num-heads` | `4` | 目标注意力头数 |
+| `--dropout` | `0.1` | Dropout 比例 |
+| `--auxiliary-weight` | `0.1` | 双塔辅助损失权重 |
+| `--lr` | `1e-4` | AdamW 学习率 |
+| `--weight-decay` | `0` | AdamW 权重衰减 |
+| `--val-ratio` | `0.1` | 验证集比例 |
+| `--test-ratio` | `0.1` | 测试集比例 |
+| `--seed` | `100` | 负采样、数据划分和模型初始化种子 |
+
 个性化 gate 和 task bias 默认开启，可分别关闭：
 
 ```powershell
@@ -81,16 +100,17 @@ python main.py rank train --no-use-task-bias
 python main.py rank train --sample-rows 2000 --epochs 1 --device cpu
 ```
 
-运行多随机种子消融实验：
+快速运行多随机种子消融实验：
 
 ```powershell
-python main.py rank ablation --sample-rows 20000 --epochs 3 --seeds 42 43 44
+python main.py rank ablation `
+  --sample-rows 20000 `
+  --epochs 3 `
+  --batch-size 512 `
+  --seeds 42 43 44
 ```
 
-每个消融配置独立监控验证集 `mean_gauc`。默认连续 2 个 epoch
-没有提升便提前停止，可通过 `--early-stopping-patience` 调整；
-设置为 `0` 可禁用早停。`--early-stopping-min-delta` 用于指定被视为
-有效提升的最小幅度，默认值为 `0.001`。采样后的数据默认按 8:1:1
+采样后的数据默认按 8:1:1
 划分为训练集、验证集和测试集；验证集用于早停和选择最佳 epoch，
 恢复最佳权重后只在测试集上进行一次最终评价。
 
@@ -98,7 +118,8 @@ python main.py rank ablation --sample-rows 20000 --epochs 3 --seeds 42 43 44
 `mean_auc`、`mean_gauc`、`mean_logloss`。GAUC 按有效用户样本数加权，
 只有单一标签的用户不参与计算；最佳 epoch 按 `mean_gauc` 选择。
 
-消融结果默认保存至 `outputs/rank/ablation/`。
+消融结果默认保存至 `outputs/rank/ablation/`，其中验证指标使用
+`validation_*` 前缀，恢复最佳权重后的最终测试指标使用 `test_*` 前缀。
 
 ## 召回
 
