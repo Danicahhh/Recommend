@@ -16,24 +16,24 @@ DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def add_rank_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA)
-    parser.add_argument("--sample-rows", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--sample-rows", type=int, default=None) # 限制读取或抽样的数据行数
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--embedding-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
-    parser.add_argument("--num-experts", type=int, default=2)
+    parser.add_argument("--num-experts", type=int, default=3)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--auxiliary-weight", type=float, default=0.1)
+    parser.add_argument("--auxiliary-weight", type=float, default=0.1) # 总损失 = 主任务损失 + auxiliary_weight × 双塔辅助损失
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--weight-decay", type=float, default=0.0) # 权重衰减，用来减少模型过拟合。
+    parser.add_argument("--val-ratio", type=float, default=0.1) # 验证集比例
     parser.add_argument("--test-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--device", default=DEFAULT_DEVICE)
 
-
+# 构建命令行参数解析器
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="多任务推荐系统")
     stages = parser.add_subparsers(dest="stage", required=True)
@@ -53,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    rank_train.add_argument("--early-stopping-patience", type=int, default=2)
+    rank_train.add_argument("--early-stopping-min-delta", type=float, default=0.001)
     rank_train.add_argument("--mean-pooling", action="store_true")
     rank_train.add_argument(
         "--output-dir",
@@ -68,7 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
         num_experts=3,
         sample_rows=20000,
     )
-    rank_ablation.add_argument("--seeds", type=int, nargs="+", default=None)
+    rank_ablation.add_argument("--early-stopping-patience", type=int, default=2)
+    rank_ablation.add_argument("--early-stopping-min-delta", type=float, default=0.001)
+    rank_ablation.add_argument("--seeds", type=int, nargs="+", default=None) # --seeds 可以接收多个随机种子
     rank_ablation.add_argument(
         "--output-dir",
         type=Path,
@@ -137,22 +141,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if getattr(args, "seeds", None) is None and args.stage == "rank":
         args.seeds = [args.seed]
-    try:
-        return args.handler(args)
-    except RuntimeError as error:
-        is_oom = "CUDA out of memory" in str(error)
-        if (
-            is_oom
-            and args.stage == "rank"
-            and args.command == "ablation"
-            and args.device.startswith("cuda")
-            and args.batch_size > 256
-        ):
-            print(f"CUDA OOM with batch_size={args.batch_size}; retrying with 256")
-            torch.cuda.empty_cache()
-            args.batch_size = 256
-            return args.handler(args)
-        raise
+    return args.handler(args)
 
 
 if __name__ == "__main__":

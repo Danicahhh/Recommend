@@ -16,6 +16,35 @@ from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
 CLICK_NEGATIVE_RATIO = 2
 
 
+class EarlyStopping:
+    """Track a maximized validation metric across consecutive epochs."""
+
+    def __init__(self, patience: int, min_delta: float = 0.0):
+        if patience < 0:
+            raise ValueError("--early-stopping-patience must be non-negative")
+        if min_delta < 0:
+            raise ValueError("--early-stopping-min-delta must be non-negative")
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_value = float("-inf")
+        self.epochs_without_improvement = 0
+
+    def step(self, value: float) -> tuple[bool, bool]:
+        improved = (
+            math.isfinite(value) and value > self.best_value + self.min_delta
+        )
+        if improved:
+            self.best_value = value
+            self.epochs_without_improvement = 0
+        else:
+            self.epochs_without_improvement += 1
+        should_stop = (
+            self.patience > 0
+            and self.epochs_without_improvement >= self.patience
+        )
+        return improved, should_stop
+
+
 def sample_click_negatives(
     frame: pd.DataFrame,
     seed: int,
@@ -165,12 +194,18 @@ def run_rank_training(args) -> None:
 
     best_epoch = 1
     best_metrics = None
-    best_gauc = float("-inf")
+    early_stopping = EarlyStopping(
+        patience=args.early_stopping_patience,
+        min_delta=args.early_stopping_min_delta,
+    )
+    completed_epochs = 0
+    stopped_early = False
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "rank_mmoe_best.pt"
     results_path = output_dir / "rank_mmoe_results.json"
     for epoch in range(1, args.epochs + 1):
+        completed_epochs = epoch
         model.train()
         total_loss = 0.0
         progress = tqdm(
@@ -208,15 +243,11 @@ def run_rank_training(args) -> None:
             device,
             progress_desc=f"rank validate {epoch}/{args.epochs}",
         )
-        is_best = best_metrics is None
+        improved, should_stop = early_stopping.step(metrics["mean_gauc"])
+        is_best = best_metrics is None or improved
         if is_best:
             best_epoch = epoch
             best_metrics = metrics
-        if math.isfinite(metrics["mean_gauc"]) and metrics["mean_gauc"] > best_gauc:
-            best_epoch = epoch
-            best_metrics = metrics
-            best_gauc = metrics["mean_gauc"]
-            is_best = True
         if is_best:
             torch.save(
                 {
@@ -242,7 +273,17 @@ def run_rank_training(args) -> None:
                 f"LogLoss={metrics[f'{task}_logloss']:.6f}"
             )
 
-    if best_gauc == float("-inf"):
+        if should_stop:
+            stopped_early = True
+            print(
+                f"early stopping at epoch={epoch}: validation mean_gauc "
+                f"did not improve by more than "
+                f"{args.early_stopping_min_delta:g} for "
+                f"{args.early_stopping_patience} consecutive epochs"
+            )
+            break
+
+    if early_stopping.best_value == float("-inf"):
         print(
             "warning: mean_gauc could not be computed for any epoch; "
             "retaining the first epoch as best"
@@ -284,6 +325,8 @@ def run_rank_training(args) -> None:
             "test": len(test_frame),
         },
         "best_epoch": best_epoch,
+        "completed_epochs": completed_epochs,
+        "stopped_early": stopped_early,
         "validation_metrics": best_metrics,
         "test_metrics": test_metrics,
         "hyperparameters": {
@@ -294,6 +337,8 @@ def run_rank_training(args) -> None:
             "num_layers": args.num_layers,
             "learning_rate": args.lr,
             "weight_decay": args.weight_decay,
+            "early_stopping_patience": args.early_stopping_patience,
+            "early_stopping_min_delta": args.early_stopping_min_delta,
             "seed": args.seed,
         },
     }

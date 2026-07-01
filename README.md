@@ -87,6 +87,13 @@ python main.py rank train --sample-rows 2000 --epochs 1 --device cpu
 python main.py rank ablation --sample-rows 20000 --epochs 3 --seeds 42 43 44
 ```
 
+每个消融配置独立监控验证集 `mean_gauc`。默认连续 2 个 epoch
+没有提升便提前停止，可通过 `--early-stopping-patience` 调整；
+设置为 `0` 可禁用早停。`--early-stopping-min-delta` 用于指定被视为
+有效提升的最小幅度，默认值为 `0.001`。采样后的数据默认按 8:1:1
+划分为训练集、验证集和测试集；验证集用于早停和选择最佳 epoch，
+恢复最佳权重后只在测试集上进行一次最终评价。
+
 排序阶段为每个任务分别计算 AUC、GAUC、LogLoss，并输出
 `mean_auc`、`mean_gauc`、`mean_logloss`。GAUC 按有效用户样本数加权，
 只有单一标签的用户不参与计算；最佳 epoch 按 `mean_gauc` 选择。
@@ -103,7 +110,6 @@ python main.py rank ablation --sample-rows 20000 --epochs 3 --seeds 42 43 44
 ```powershell
 python main.py recall train --data-path dataset/ctr_data_1M.csv --epochs 6 --loss-type infonce
 ```
-
 训练会在 `outputs/recall/` 保存最佳 Checkpoint 和历史指标。Checkpoint
 包含模型配置、稳定的物品/画像/类目映射和词表规模。召回结果会自动转换回
 原始 `item_id`，padding ID `0` 不会进入候选集。

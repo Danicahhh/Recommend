@@ -1,5 +1,4 @@
 import json
-import math
 from pathlib import Path
 from typing import Dict, List
 
@@ -11,7 +10,12 @@ from tqdm import tqdm
 from recommender.data_process.rank import TASK_NAMES, RankDataset, build_feature_maps
 from recommender.evaluation import compute_multitask_metrics
 from recommender.models.mmoe import RankMMOEModel, RankMultiTaskLoss
-from recommender.training.rank import move_batch, sample_click_negatives
+from recommender.training.rank import (
+    EarlyStopping,
+    move_batch,
+    sample_click_negatives,
+    split_rank_frame,
+)
 
 
 ABLATIONS = (
@@ -284,12 +288,16 @@ def run_one_seed(
     seed_dir.mkdir(parents=True, exist_ok=True)
 
     sampled_frame = sample_click_negatives(frame, seed=seed)
-    seed_frame = sampled_frame.sample(frac=1.0, random_state=seed).reset_index(
-        drop=True
+    train_frame, val_frame, test_frame = split_rank_frame(
+        sampled_frame,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=seed,
     )
-    split_index = int(len(seed_frame) * (1.0 - args.val_ratio))
-    train_frame = seed_frame.iloc[:split_index].reset_index(drop=True)
-    val_frame = seed_frame.iloc[split_index:].reset_index(drop=True)
+    print(
+        f"seed={seed} split train={len(train_frame)} "
+        f"validate={len(val_frame)} test={len(test_frame)}"
+    )
     user_map, item_map, category_map, gender_map, age_map = build_feature_maps(
         sampled_frame
     )
@@ -300,8 +308,14 @@ def run_one_seed(
     val_dataset = RankDataset(
         val_frame, user_map, item_map, category_map, gender_map, age_map
     )
+    test_dataset = RankDataset(
+        test_frame, user_map, item_map, category_map, gender_map, age_map
+    )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0
     )
 
     device = torch.device(args.device)
@@ -336,6 +350,13 @@ def run_one_seed(
         )
 
         history = []
+        best = None
+        best_state_dict = None
+        stopped_early = False
+        early_stopping = EarlyStopping(
+            patience=args.early_stopping_patience,
+            min_delta=args.early_stopping_min_delta,
+        )
         print(f"seed={seed} running {exp['name']}")
         for epoch in range(1, args.epochs + 1):
             train_loss = train_one_epoch(
@@ -365,6 +386,13 @@ def run_one_seed(
             )
             epoch_row = {"epoch": epoch, "train_loss": train_loss, **metrics}
             history.append(epoch_row)
+            improved, should_stop = early_stopping.step(metrics["mean_gauc"])
+            if best is None or improved:
+                best = epoch_row
+                best_state_dict = {
+                    name: value.detach().cpu().clone()
+                    for name, value in model.state_dict().items()
+                }
             print(
                 f"seed={seed} {exp['name']} epoch={epoch} train_loss={train_loss:.6f} "
                 f"val_loss={metrics['val_loss']:.6f} "
@@ -373,18 +401,66 @@ def run_one_seed(
                 f"mean_logloss={metrics['mean_logloss']:.6f}"
             )
 
-        best = max(
-            history,
-            key=lambda row: (
-                row["mean_gauc"] if math.isfinite(row["mean_gauc"]) else float("-inf")
-            ),
-        )
-        if not any(math.isfinite(row["mean_gauc"]) for row in history):
+            if should_stop:
+                stopped_early = True
+                print(
+                    f"seed={seed} {exp['name']} early stopping at epoch={epoch}: "
+                    "validation mean_gauc did not improve by more than "
+                    f"{args.early_stopping_min_delta:g} for "
+                    f"{args.early_stopping_patience} consecutive epochs"
+                )
+                break
+
+        if early_stopping.best_value == float("-inf"):
             print(
                 f"warning: seed={seed} {exp['name']} has no computable mean_gauc; "
                 "retaining the first epoch as best"
             )
-        row = {"seed": seed, **exp, **best}
+        model.load_state_dict(best_state_dict)
+        test_metrics = evaluate(
+            model,
+            criterion,
+            test_loader,
+            device,
+            use_item_side_features=exp["use_item_side_features"],
+            use_profile_features=exp["use_profile_features"],
+            use_auxiliary_loss=exp["use_auxiliary_loss"],
+            progress_desc=f"ablation test {exp['name']}",
+        )
+        print(
+            f"seed={seed} {exp['name']} best_epoch={best['epoch']} "
+            f"test_loss={test_metrics['val_loss']:.6f} "
+            f"test_mean_auc={test_metrics['mean_auc']:.6f} "
+            f"test_mean_gauc={test_metrics['mean_gauc']:.6f} "
+            f"test_mean_logloss={test_metrics['mean_logloss']:.6f}"
+        )
+
+        validation_result = {
+            "validation_loss": best["val_loss"],
+            **{
+                f"validation_{key}": value
+                for key, value in best.items()
+                if key not in {"epoch", "train_loss", "val_loss"}
+            },
+        }
+        test_result = {
+            "test_loss": test_metrics["val_loss"],
+            **{
+                f"test_{key}": value
+                for key, value in test_metrics.items()
+                if key != "val_loss"
+            },
+        }
+        row = {
+            "seed": seed,
+            **exp,
+            "best_epoch": best["epoch"],
+            "best_train_loss": best["train_loss"],
+            **validation_result,
+            **test_result,
+            "completed_epochs": len(history),
+            "stopped_early": stopped_early,
+        }
         seed_rows.append(row)
         with (seed_dir / f"{exp['name']}_history.json").open(
             "w", encoding="utf-8"
@@ -393,6 +469,11 @@ def run_one_seed(
                 {
                     "seed": seed,
                     "config": exp,
+                    "split_sizes": {
+                        "train": len(train_frame),
+                        "validation": len(val_frame),
+                        "test": len(test_frame),
+                    },
                     "model_hyperparameters": {
                         "embedding_dim": args.embedding_dim,
                         "hidden_dim": args.hidden_dim,
@@ -401,6 +482,17 @@ def run_one_seed(
                         "num_heads": args.num_heads,
                         "dropout": args.dropout,
                     },
+                    "early_stopping": {
+                        "monitor": "mean_gauc",
+                        "mode": "max",
+                        "patience": args.early_stopping_patience,
+                        "min_delta": args.early_stopping_min_delta,
+                        "completed_epochs": len(history),
+                        "stopped_early": stopped_early,
+                        "best_epoch": best["epoch"],
+                    },
+                    "best_validation_metrics": validation_result,
+                    "test_metrics": test_result,
                     "history": history,
                 },
                 f,
@@ -426,24 +518,42 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
         "use_profile_features",
     ]
     metric_columns = [
-        "epoch",
-        "train_loss",
-        "val_loss",
-        "click_auc",
-        "click_gauc",
-        "click_logloss",
-        "follow_auc",
-        "follow_gauc",
-        "follow_logloss",
-        "like_auc",
-        "like_gauc",
-        "like_logloss",
-        "share_auc",
-        "share_gauc",
-        "share_logloss",
-        "mean_auc",
-        "mean_gauc",
-        "mean_logloss",
+        "best_epoch",
+        "best_train_loss",
+        "validation_loss",
+        "validation_click_auc",
+        "validation_click_gauc",
+        "validation_click_logloss",
+        "validation_follow_auc",
+        "validation_follow_gauc",
+        "validation_follow_logloss",
+        "validation_like_auc",
+        "validation_like_gauc",
+        "validation_like_logloss",
+        "validation_share_auc",
+        "validation_share_gauc",
+        "validation_share_logloss",
+        "validation_mean_auc",
+        "validation_mean_gauc",
+        "validation_mean_logloss",
+        "test_loss",
+        "test_click_auc",
+        "test_click_gauc",
+        "test_click_logloss",
+        "test_follow_auc",
+        "test_follow_gauc",
+        "test_follow_logloss",
+        "test_like_auc",
+        "test_like_gauc",
+        "test_like_logloss",
+        "test_share_auc",
+        "test_share_gauc",
+        "test_share_logloss",
+        "test_mean_auc",
+        "test_mean_gauc",
+        "test_mean_logloss",
+        "completed_epochs",
+        "stopped_early",
     ]
 
     rows = []
