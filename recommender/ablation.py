@@ -1,6 +1,7 @@
 import json
+import math
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 import torch
@@ -17,8 +18,8 @@ from recommender.training.rank import (
     split_rank_frame,
 )
 
-
-ABLATIONS = (
+# 模型结构实验
+_ARCHITECTURE_ABLATIONS = (
     {
         "name": "A0_plain_mmoe_id_only",
         "use_attribute_expert_mask": False,
@@ -120,6 +121,104 @@ ABLATIONS = (
         "use_profile_features": False,
     },
 )
+ABLATIONS = tuple(
+    {
+        **experiment,
+        "use_pos_weight": True,
+        "use_normalized_pos_weight": True,
+        "task_weighting_method": "equal",
+    }
+    for experiment in _ARCHITECTURE_ABLATIONS
+)
+
+# 任务损失权重实验
+TASK_WEIGHTING_EXPERIMENTS = (
+    {
+        "name": "TW0_pos_weight_mean",
+        "use_attribute_expert_mask": True,
+        "use_personalized_gate": True,
+        "use_task_bias": True,
+        "use_target_attention": True,
+        "use_auxiliary_loss": True,
+        "use_item_side_features": True,
+        "use_profile_features": True,
+        "use_pos_weight": True, # 使用pos_weight，提高正样本的损失权重
+        "use_normalized_pos_weight": False, # 使用平均归一化
+        "task_weighting_method": "equal",
+    },
+    {
+        "name": "TW1_equal",
+        "use_attribute_expert_mask": True,
+        "use_personalized_gate": True,
+        "use_task_bias": True,
+        "use_target_attention": True,
+        "use_auxiliary_loss": True,
+        "use_item_side_features": True,
+        "use_profile_features": True,
+        "use_pos_weight": True,
+        "use_normalized_pos_weight": True, # 使用加权归一化
+        "task_weighting_method": "equal",
+    },
+    {
+        "name": "TW2_gradnorm",
+        "use_attribute_expert_mask": True,
+        "use_personalized_gate": True,
+        "use_task_bias": True,
+        "use_target_attention": True,
+        "use_auxiliary_loss": True,
+        "use_item_side_features": True,
+        "use_profile_features": True,
+        "use_pos_weight": True,
+        "use_normalized_pos_weight": True,
+        "task_weighting_method": "gradnorm",
+    },
+    {
+        "name": "TW3_uncertainty",
+        "use_attribute_expert_mask": True,
+        "use_personalized_gate": True,
+        "use_task_bias": True,
+        "use_target_attention": True,
+        "use_auxiliary_loss": True,
+        "use_item_side_features": True,
+        "use_profile_features": True,
+        "use_pos_weight": True,
+        "use_normalized_pos_weight": True,
+        "task_weighting_method": "uncertainty",
+    },
+)
+
+
+def compute_pos_weights(
+    train_frame: pd.DataFrame,
+    task_names: Sequence[str],
+    click_pos_weight: float = 1.0,
+    cap: Optional[float] = None,
+) -> Dict[str, float]:
+    """仅使用训练集统计正样本权重；click 已负采样，默认不重复校正。"""
+    if click_pos_weight <= 0:
+        raise ValueError("--click-pos-weight must be positive")
+    if cap is not None and cap <= 0:
+        raise ValueError("--pos-weight-cap must be positive")
+
+    weights = {}
+    for task in task_names:
+        if task not in train_frame.columns:
+            raise ValueError(f"ranking data must contain a '{task}' column")
+        if task == "click":
+            weight = float(click_pos_weight)
+        else:
+            positive_count = int((train_frame[task] == 1).sum())
+            negative_count = int((train_frame[task] == 0).sum())
+            if positive_count == 0 or negative_count == 0:
+                raise ValueError(
+                    f"task '{task}' needs both positive and negative training samples "
+                    "to compute pos_weight"
+                )
+            weight = negative_count / positive_count
+        if cap is not None:
+            weight = min(weight, cap)
+        weights[task] = float(weight)
+    return weights
 
 
 def train_one_epoch(
@@ -127,6 +226,8 @@ def train_one_epoch(
     criterion: RankMultiTaskLoss,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    task_weight_optimizer: Optional[torch.optim.Optimizer],
+    gradnorm_shared_parameters: Sequence[torch.nn.Parameter],
     device: torch.device,
     use_item_side_features: bool,
     use_profile_features: bool,
@@ -152,9 +253,22 @@ def train_one_epoch(
             return_auxiliary=True,
         )
         auxiliary_target = batch["targets"]["click"] if use_auxiliary_loss else None
-        loss, _ = criterion(logits, batch["targets"], auxiliary, auxiliary_target)
+        loss, task_losses = criterion(
+            logits, batch["targets"], auxiliary, auxiliary_target
+        )
+        gradnorm_loss = None
+        if criterion.task_weighting_method == "gradnorm":
+            gradnorm_loss = criterion.gradnorm_objective(
+                task_losses,
+                gradnorm_shared_parameters,
+            )
         loss.backward()
         optimizer.step()
+        if task_weight_optimizer is not None:
+            task_weight_optimizer.zero_grad()
+            gradnorm_loss.backward()
+            task_weight_optimizer.step()
+            criterion.normalize_gradnorm_weights()
         total_loss += loss.item()
         progress.set_postfix(loss=f"{total_loss / batch_index:.6f}")
     return total_loss / max(len(loader), 1)
@@ -283,6 +397,7 @@ def run_one_seed(
     frame: pd.DataFrame,
     seed: int,
     output_dir: Path,
+    experiments: Sequence[Dict] = ABLATIONS,
 ) -> List[Dict]:
     seed_dir = output_dir / f"seed_{seed}"
     seed_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +412,16 @@ def run_one_seed(
     print(
         f"seed={seed} split train={len(train_frame)} "
         f"validate={len(val_frame)} test={len(test_frame)}"
+    )
+    pos_weights = compute_pos_weights(
+        train_frame,
+        TASK_NAMES,
+        click_pos_weight=args.click_pos_weight,
+        cap=args.pos_weight_cap,
+    )
+    print(
+        "training pos_weights "
+        + " ".join(f"{task}={pos_weights[task]:.6g}" for task in TASK_NAMES)
     )
     user_map, item_map, category_map, gender_map, age_map = build_feature_maps(
         sampled_frame
@@ -328,7 +453,20 @@ def run_one_seed(
         "age": len(age_map) + 1,
     }
 
-    for exp in ABLATIONS:
+    for raw_exp in experiments:
+        exp = {
+            **raw_exp,
+            "use_pos_weight": raw_exp.get(
+                "use_pos_weight",
+                raw_exp.get("use_normalized_pos_weight", False),
+            ),
+            "use_normalized_pos_weight": raw_exp.get(
+                "use_normalized_pos_weight", False
+            ),
+            "task_weighting_method": raw_exp.get(
+                "task_weighting_method", "equal"
+            ),
+        }
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
@@ -341,17 +479,38 @@ def run_one_seed(
         )
         criterion = RankMultiTaskLoss(
             task_names=TASK_NAMES,
+            pos_weights=pos_weights
+            if exp["use_pos_weight"]
+            else None,
+            normalize_pos_weight=exp["use_normalized_pos_weight"],
+            task_weighting_method=exp["task_weighting_method"],
+            gradnorm_alpha=args.gradnorm_alpha,
+            gradnorm_min_weight=args.gradnorm_min_weight,
+            gradnorm_max_weight=args.gradnorm_max_weight,
             auxiliary_weight=args.auxiliary_weight
             if exp["use_auxiliary_loss"]
             else 0.0,
-        )
+        ).to(device)
+        optimizer_parameters = list(model.parameters())
+        if exp["task_weighting_method"] == "uncertainty":
+            optimizer_parameters.extend(criterion.parameters())
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+            optimizer_parameters,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
         )
+        task_weight_optimizer = None
+        if exp["task_weighting_method"] == "gradnorm":
+            task_weight_optimizer = torch.optim.Adam(
+                [criterion.gradnorm_weights],
+                lr=args.gradnorm_lr,
+            )
+        gradnorm_shared_parameters = tuple(model.mmoe.experts.parameters())
 
         history = []
         best = None
         best_state_dict = None
+        best_criterion_state_dict = None
         stopped_early = False
         early_stopping = EarlyStopping(
             patience=args.early_stopping_patience,
@@ -364,6 +523,8 @@ def run_one_seed(
                 criterion,
                 train_loader,
                 optimizer,
+                task_weight_optimizer,
+                gradnorm_shared_parameters,
                 device,
                 use_item_side_features=exp["use_item_side_features"],
                 use_profile_features=exp["use_profile_features"],
@@ -384,7 +545,15 @@ def run_one_seed(
                     f"ablation validate {exp['name']} {epoch}/{args.epochs}"
                 ),
             )
-            epoch_row = {"epoch": epoch, "train_loss": train_loss, **metrics}
+            epoch_row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                **metrics,
+                **{
+                    f"task_weight_{task}": weight
+                    for task, weight in criterion.current_task_weights().items()
+                },
+            }
             history.append(epoch_row)
             improved, should_stop = early_stopping.step(metrics["mean_gauc"])
             if best is None or improved:
@@ -392,6 +561,10 @@ def run_one_seed(
                 best_state_dict = {
                     name: value.detach().cpu().clone()
                     for name, value in model.state_dict().items()
+                }
+                best_criterion_state_dict = {
+                    name: value.detach().cpu().clone()
+                    for name, value in criterion.state_dict().items()
                 }
             print(
                 f"seed={seed} {exp['name']} epoch={epoch} train_loss={train_loss:.6f} "
@@ -417,6 +590,7 @@ def run_one_seed(
                 "retaining the first epoch as best"
             )
         model.load_state_dict(best_state_dict)
+        criterion.load_state_dict(best_criterion_state_dict)
         test_metrics = evaluate(
             model,
             criterion,
@@ -454,6 +628,7 @@ def run_one_seed(
         row = {
             "seed": seed,
             **exp,
+            **{f"pos_weight_{task}": pos_weights[task] for task in TASK_NAMES},
             "best_epoch": best["epoch"],
             "best_train_loss": best["train_loss"],
             **validation_result,
@@ -469,6 +644,10 @@ def run_one_seed(
                 {
                     "seed": seed,
                     "config": exp,
+                    "pos_weights": pos_weights,
+                    "best_task_weights": {
+                        task: best[f"task_weight_{task}"] for task in TASK_NAMES
+                    },
                     "split_sizes": {
                         "train": len(train_frame),
                         "validation": len(val_frame),
@@ -481,6 +660,10 @@ def run_one_seed(
                         "num_experts": args.num_experts,
                         "num_heads": args.num_heads,
                         "dropout": args.dropout,
+                        "gradnorm_alpha": args.gradnorm_alpha,
+                        "gradnorm_lr": args.gradnorm_lr,
+                        "gradnorm_min_weight": args.gradnorm_min_weight,
+                        "gradnorm_max_weight": args.gradnorm_max_weight,
                     },
                     "early_stopping": {
                         "monitor": "mean_gauc",
@@ -516,6 +699,13 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
         "use_auxiliary_loss",
         "use_item_side_features",
         "use_profile_features",
+        "use_pos_weight",
+        "use_normalized_pos_weight",
+        "task_weighting_method",
+        "pos_weight_click",
+        "pos_weight_follow",
+        "pos_weight_like",
+        "pos_weight_share",
     ]
     metric_columns = [
         "best_epoch",
@@ -536,6 +726,10 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
         "validation_mean_auc",
         "validation_mean_gauc",
         "validation_mean_logloss",
+        "validation_task_weight_click",
+        "validation_task_weight_follow",
+        "validation_task_weight_like",
+        "validation_task_weight_share",
         "test_loss",
         "test_click_auc",
         "test_click_gauc",
@@ -569,10 +763,23 @@ def summarize_results(per_seed: pd.DataFrame) -> pd.DataFrame:
 def run_rank_ablation(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     frame = pd.read_csv(args.data_path, nrows=args.sample_rows)
+    experiments = (
+        TASK_WEIGHTING_EXPERIMENTS
+        if args.experiment_suite == "task-weighting"
+        else ABLATIONS
+    )
 
     all_rows = []
     for seed in args.seeds:
-        all_rows.extend(run_one_seed(args, frame, seed, args.output_dir))
+        all_rows.extend(
+            run_one_seed(
+                args,
+                frame,
+                seed,
+                args.output_dir,
+                experiments=experiments,
+            )
+        )
 
     per_seed = pd.DataFrame(all_rows)
     per_seed.to_csv(

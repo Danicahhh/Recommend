@@ -534,18 +534,171 @@ class RankMultiTaskLoss(nn.Module):
             Dict[str, float]
         ] = None,  # 正样本权重：一个正样本对应几个负样本，解决正负样本不平衡，放大正样本损失
         auxiliary_weight: float = 0.1,  # 双塔辅助损失权重
+        normalize_pos_weight: bool = False,
+        task_weighting_method: str = "equal",
+        gradnorm_alpha: float = 0.5,
+        gradnorm_min_weight: float = 0.2,
+        gradnorm_max_weight: float = 5.0,
     ):
         super().__init__()
         self.task_names = list(task_names)
         self.task_weights = task_weights or {}
         self.auxiliary_weight = auxiliary_weight
+        self.normalize_pos_weight = normalize_pos_weight
+        self.task_weighting_method = task_weighting_method
+        self.gradnorm_alpha = gradnorm_alpha
+        self.gradnorm_min_weight = gradnorm_min_weight
+        self.gradnorm_max_weight = gradnorm_max_weight
+
+        if task_weighting_method not in {"equal", "gradnorm", "uncertainty"}:
+            raise ValueError(
+                "task_weighting_method must be one of: "
+                "equal, gradnorm, uncertainty"
+            )
+        if gradnorm_alpha < 0:
+            raise ValueError("gradnorm_alpha must be non-negative")
+        if not 0 < gradnorm_min_weight <= 1.0 <= gradnorm_max_weight:
+            raise ValueError(
+                "gradnorm weights require 0 < min_weight <= 1 <= max_weight"
+            )
 
         if pos_weights is None:
             self.pos_weights = None
         else:
             weights = [float(pos_weights.get(task, 1.0)) for task in self.task_names]
+            if any(weight <= 0 for weight in weights):
+                raise ValueError("all pos_weights must be positive")
             self.register_buffer(
                 "pos_weights", torch.tensor(weights, dtype=torch.float32)
+            )
+
+        if task_weighting_method == "gradnorm":
+            self.gradnorm_weights = nn.Parameter(
+                torch.ones(len(self.task_names), dtype=torch.float32)
+            )
+            self.register_buffer(
+                "initial_task_losses",
+                torch.full((len(self.task_names),), float("nan")),
+            )
+        else:
+            self.register_parameter("gradnorm_weights", None)
+            self.initial_task_losses = None
+
+        if task_weighting_method == "uncertainty":
+            self.log_task_variances = nn.Parameter(
+                torch.zeros(len(self.task_names), dtype=torch.float32)
+            )
+        else:
+            self.register_parameter("log_task_variances", None)
+
+    def _task_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        pos_weight: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        target = target.float()
+        element_losses = F.binary_cross_entropy_with_logits(
+            prediction,
+            target,
+            pos_weight=pos_weight,
+            reduction="none", # 不使用样本平均，以防止损失过大。
+        )
+        if not self.normalize_pos_weight or pos_weight is None:
+            return element_losses.mean()
+        # 优化点：正样本权重归一化，避免正样本权重过大导致总损失过大，影响梯度更新。
+        effective_weights = torch.where(
+            target > 0.5,
+            pos_weight.to(device=target.device, dtype=target.dtype),
+            torch.ones_like(target),
+        )
+        return element_losses.sum() / effective_weights.sum().clamp_min(1.0)
+
+    def current_task_weights(self) -> Dict[str, float]:
+        if self.task_weighting_method == "gradnorm":
+            values = self.gradnorm_weights.detach()
+        elif self.task_weighting_method == "uncertainty":
+            values = torch.exp(-self.log_task_variances.detach())
+        else:
+            values = torch.tensor(
+                [self.task_weights.get(task, 1.0) for task in self.task_names],
+                dtype=torch.float32,
+            )
+        return {
+            task: float(value)
+            for task, value in zip(self.task_names, values.cpu().tolist())
+        }
+
+    def gradnorm_objective(
+        self,
+        losses: Dict[str, torch.Tensor],
+        shared_parameters: Sequence[torch.nn.Parameter],
+    ) -> torch.Tensor:
+        if self.task_weighting_method != "gradnorm":
+            raise RuntimeError(
+                "gradnorm_objective requires task_weighting_method=gradnorm"
+            )
+
+        task_losses = torch.stack([losses[task] for task in self.task_names])
+        if torch.isnan(self.initial_task_losses).any():
+            self.initial_task_losses.copy_(task_losses.detach().clamp_min(1e-8))
+
+        shared_parameters = tuple(
+            parameter for parameter in shared_parameters if parameter.requires_grad
+        )
+        if not shared_parameters:
+            raise ValueError("GradNorm requires at least one shared parameter")
+
+        base_gradient_norms = []
+        for task_loss in task_losses:
+            gradients = torch.autograd.grad(
+                task_loss,
+                shared_parameters,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            squared_norm = task_loss.new_tensor(0.0)
+            for gradient in gradients:
+                if gradient is not None:
+                    squared_norm = squared_norm + gradient.detach().pow(2).sum()
+            base_gradient_norms.append(squared_norm.sqrt().clamp_min(1e-12))
+
+        base_gradient_norms = torch.stack(base_gradient_norms)
+        gradient_norms = self.gradnorm_weights * base_gradient_norms
+        relative_losses = (
+            task_losses.detach() / self.initial_task_losses.clamp_min(1e-8)
+        )
+        inverse_training_rates = relative_losses / relative_losses.mean().clamp_min(
+            1e-8
+        )
+        target_norms = (
+            gradient_norms.detach().mean()
+            * inverse_training_rates.pow(self.gradnorm_alpha)
+        )
+        return torch.abs(gradient_norms - target_norms).sum()
+
+    @torch.no_grad()
+    def normalize_gradnorm_weights(self) -> None:
+        if self.task_weighting_method != "gradnorm":
+            return
+        self.gradnorm_weights.clamp_(
+            min=self.gradnorm_min_weight,
+            max=self.gradnorm_max_weight,
+        )
+        target_sum = float(len(self.task_names))
+        difference = target_sum - float(self.gradnorm_weights.sum())
+        if abs(difference) <= 1e-8:
+            return
+
+        if difference > 0:
+            capacity = self.gradnorm_max_weight - self.gradnorm_weights
+            self.gradnorm_weights.add_(
+                difference * capacity / capacity.sum().clamp_min(1e-8)
+            )
+        else:
+            capacity = self.gradnorm_weights - self.gradnorm_min_weight
+            self.gradnorm_weights.sub_(
+                -difference * capacity / capacity.sum().clamp_min(1e-8)
             )
 
     def forward(
@@ -562,13 +715,21 @@ class RankMultiTaskLoss(nn.Module):
             pos_weight = None
             if self.pos_weights is not None:
                 pos_weight = self.pos_weights[idx].view(1)
-            task_loss = F.binary_cross_entropy_with_logits(
-                predictions[task], targets[task].float(), pos_weight=pos_weight
+            task_loss = self._task_loss(
+                predictions[task],
+                targets[task],
+                pos_weight,
             )
             losses[task] = task_loss
-            total = (
-                total + self.task_weights.get(task, 1.0) * task_loss
-            )  # 所有任务的损失加权求和，得到总损失
+
+            if self.task_weighting_method == "gradnorm":
+                # GradNorm 单独更新任务权重；训练模型时不让主损失反向更新权重。
+                total = total + self.gradnorm_weights[idx].detach() * task_loss
+            elif self.task_weighting_method == "uncertainty":
+                precision = torch.exp(-self.log_task_variances[idx])
+                total = total + precision * task_loss + self.log_task_variances[idx]
+            else:
+                total = total + self.task_weights.get(task, 1.0) * task_loss
 
         if (
             auxiliary_outputs is not None

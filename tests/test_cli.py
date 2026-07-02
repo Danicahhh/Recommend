@@ -40,6 +40,28 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.num_experts, 3)
         self.assertEqual(args.early_stopping_patience, 2)
         self.assertEqual(args.early_stopping_min_delta, 0.001)
+        self.assertEqual(args.experiment_suite, "architecture")
+
+    def test_task_weighting_experiment_options(self):
+        args = self.parser.parse_args(
+            [
+                "rank",
+                "ablation",
+                "--experiment-suite",
+                "task-weighting",
+                "--seeds",
+                "42",
+                "43",
+                "--gradnorm-alpha",
+                "0.7",
+                "--pos-weight-cap",
+                "50",
+            ]
+        )
+        self.assertEqual(args.experiment_suite, "task-weighting")
+        self.assertEqual(args.seeds, [42, 43])
+        self.assertEqual(args.gradnorm_alpha, 0.7)
+        self.assertEqual(args.pos_weight_cap, 50)
 
     def test_rank_ablation_does_not_silently_retry_cuda_oom(self):
         handler = Mock(side_effect=RuntimeError("CUDA out of memory"))
@@ -61,6 +83,7 @@ class CliTest(unittest.TestCase):
     def test_recall_train(self):
         args = self.parser.parse_args(["recall", "train"])
         self.assertEqual(args.loss_type, "infonce")
+        self.assertEqual(args.eval_k, [5, 10, 20])
         self.assertFalse(hasattr(args, "item_mapping_mode"))
 
     def test_recall_train_rejects_removed_raw_mapping_option(self):

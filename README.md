@@ -129,11 +129,16 @@ python main.py rank ablation `
 训练双塔：
 
 ```powershell
-python main.py recall train --data-path dataset/ctr_data_1M.csv --epochs 6 --loss-type infonce
+python main.py recall train --data-path dataset/ctr_data_1M.csv --epochs 6 --loss-type infonce --eval-k 5 10 20
 ```
 训练会在 `outputs/recall/` 保存最佳 Checkpoint 和历史指标。Checkpoint
 包含模型配置、稳定的物品/画像/类目映射和词表规模。召回结果会自动转换回
 原始 `item_id`，padding ID `0` 不会进入候选集。
+
+验证阶段在完整候选物品库上按用户计算 `Recall@K`、`HitRate@K` 和
+`NDCG@K`，`--eval-k` 可配置一个或多个 K；默认使用 `5 10 20`，并按最大
+K 对应的验证集 `NDCG@K` 保存最佳 Checkpoint。只有验证集中至少存在一个
+正样本物品的用户参与这些指标的宏平均。
 
 加载 Checkpoint 并生成候选：
 

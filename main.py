@@ -65,14 +65,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     rank_ablation = rank_commands.add_parser("ablation", help="运行排序消融实验")
     add_rank_model_arguments(rank_ablation)
-    rank_ablation.set_defaults(
-        embedding_dim=32,
-        num_experts=3,
-        sample_rows=20000,
-    )
+    # rank_ablation.set_defaults(
+    #     embedding_dim=32,
+    #     num_experts=3,
+    # )
     rank_ablation.add_argument("--early-stopping-patience", type=int, default=2)
     rank_ablation.add_argument("--early-stopping-min-delta", type=float, default=0.001)
     rank_ablation.add_argument("--seeds", type=int, nargs="+", default=None) # --seeds 可以接收多个随机种子
+    rank_ablation.add_argument(
+        "--experiment-suite",
+        choices=("architecture", "task-weighting"),
+        default="architecture",
+        help="运行结构消融，或固定完整架构比较任务损失/权重方法",
+    )
+    rank_ablation.add_argument(
+        "--click-pos-weight",
+        type=float,
+        default=1.0,
+        help="click 已做负采样，任务权重实验默认不再放大其正样本",
+    )
+    rank_ablation.add_argument(
+        "--pos-weight-cap",
+        type=float,
+        default=20,
+        help="可选的正样本权重上限；默认直接使用训练集 neg/pos",
+    )
+    rank_ablation.add_argument("--gradnorm-alpha", type=float, default=0.5)
+    rank_ablation.add_argument("--gradnorm-lr", type=float, default=1e-3)
+    rank_ablation.add_argument("--gradnorm-min-weight", type=float, default=0.2)
+    rank_ablation.add_argument("--gradnorm-max-weight", type=float, default=5.0)
     rank_ablation.add_argument(
         "--output-dir",
         type=Path,
@@ -111,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     recall_train.add_argument("--lr", type=float, default=1e-3)
     recall_train.add_argument("--weight-decay", type=float, default=1e-5)
     recall_train.add_argument("--val-ratio", type=float, default=0.2)
+    recall_train.add_argument(
+        "--eval-k",
+        type=int,
+        nargs="+",
+        default=[5, 10, 20],
+        help="召回验证指标使用的 K 值",
+    )
     recall_train.add_argument("--seed", type=int, default=42)
     recall_train.add_argument("--device", default=DEFAULT_DEVICE)
     recall_train.set_defaults(handler=run_recall_training)

@@ -37,13 +37,13 @@ runs/
 result/
 outputs/
 *.log
+test/
 
 # 数据文件
 *.csv
 *.pkl
 *.h5
 dataset/
-docs/
 
 # IDE
 .vscode/

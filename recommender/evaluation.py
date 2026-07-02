@@ -1,4 +1,4 @@
-"""排序模型的 AUC、GAUC 与 LogLoss 指标。"""
+"""排序与召回模型的离线评价指标。"""
 
 from typing import Dict, Mapping, Sequence
 
@@ -106,4 +106,58 @@ def compute_multitask_metrics(
     metrics["mean_auc"] = _finite_mean(auc_values)
     metrics["mean_gauc"] = _finite_mean(gauc_values)
     metrics["mean_logloss"] = _finite_mean(logloss_values)
+    return metrics
+
+
+def compute_topk_retrieval_metrics(
+    recommendations: Mapping[int, Sequence[int]],
+    relevant_items: Mapping[int, Sequence[int]],
+    ks: Sequence[int],
+) -> Dict[str, float]:
+    """计算用户级宏平均 Recall@K、HitRate@K 和 NDCG@K。
+
+    只评估至少有一个相关物品的用户。推荐列表和相关集合中的重复物品均按
+    一个物品处理，避免重复召回被重复计分。
+    """
+    normalized_ks = sorted({int(k) for k in ks})
+    if not normalized_ks or any(k <= 0 for k in normalized_ks):
+        raise ValueError("ks must contain at least one positive integer")
+
+    user_values = {
+        k: {"recall": [], "hit_rate": [], "ndcg": []} for k in normalized_ks
+    }
+    evaluated_users = 0
+
+    for user_id, raw_relevant in relevant_items.items():
+        relevant = set(raw_relevant)
+        if not relevant:
+            continue
+
+        ranked_items = list(dict.fromkeys(recommendations.get(user_id, ())))
+        evaluated_users += 1
+        for k in normalized_ks:
+            top_items = ranked_items[:k]
+            hit_positions = [
+                rank
+                for rank, item_id in enumerate(top_items, start=1)
+                if item_id in relevant
+            ]
+            hit_count = len(hit_positions)
+            dcg = sum(1.0 / np.log2(rank + 1.0) for rank in hit_positions)
+            ideal_hits = min(k, len(relevant))
+            idcg = sum(
+                1.0 / np.log2(rank + 1.0)
+                for rank in range(1, ideal_hits + 1)
+            )
+
+            user_values[k]["recall"].append(hit_count / len(relevant))
+            user_values[k]["hit_rate"].append(float(hit_count > 0))
+            user_values[k]["ndcg"].append(dcg / idcg if idcg > 0 else 0.0)
+
+    metrics: Dict[str, float] = {"evaluated_users": float(evaluated_users)}
+    for k in normalized_ks:
+        for metric_name, values in user_values[k].items():
+            metrics[f"{metric_name}@{k}"] = (
+                float(np.mean(values)) if values else float("nan")
+            )
     return metrics
