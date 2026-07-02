@@ -37,7 +37,7 @@ runs/
 result/
 outputs/
 *.log
-test/
+tests/
 
 # 数据文件
 *.csv
