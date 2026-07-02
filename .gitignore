@@ -44,6 +44,7 @@ tests/
 *.pkl
 *.h5
 dataset/
+docs/
 
 # IDE
 .vscode/
